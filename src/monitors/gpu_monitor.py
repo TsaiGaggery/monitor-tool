@@ -210,6 +210,51 @@ class GPUMonitor:
         except Exception as e:
             return None
     
+    def _get_intel_gpu_memory_from_debugfs(self) -> Optional[tuple]:
+        """Get Intel GPU memory usage from i915_gem_objects.
+        
+        Returns:
+            Tuple of (used_bytes, total_bytes) or None if unavailable
+        """
+        try:
+            # Find i915_gem_objects file
+            gem_objects_path = None
+            for variant in ['0000:00:02.0', '1', '128', '0']:
+                path = f'/sys/kernel/debug/dri/{variant}/i915_gem_objects'
+                test_result = subprocess.run(['sudo', '-n', 'cat', path],
+                                           capture_output=True, text=True, timeout=1)
+                if test_result.returncode == 0:
+                    gem_objects_path = path
+                    content = test_result.stdout
+                    break
+            
+            if not gem_objects_path or not content:
+                return None
+            
+            # Parse first line: "3787 shrinkable [0 free] objects, 4150968320 bytes"
+            first_line = content.split('\n')[0]
+            if 'bytes' in first_line:
+                parts = first_line.split(',')
+                if len(parts) >= 2:
+                    bytes_part = parts[-1].strip()  # "4150968320 bytes"
+                    used_bytes = int(bytes_part.split()[0])
+                    
+                    # Parse system memory line: "system: total:0x0000000f9effa000 bytes"
+                    for line in content.split('\n'):
+                        if 'system: total:' in line:
+                            # Extract hex value
+                            hex_part = line.split('total:')[1].split()[0]
+                            total_bytes = int(hex_part, 16)
+                            return (used_bytes, total_bytes)
+                    
+                    # If no system total found, return used with 0 total
+                    return (used_bytes, 0)
+            
+            return None
+            
+        except Exception as e:
+            return None
+    
     def get_intel_info(self) -> Dict:
         """Get Intel GPU information using sysfs (supports i915 and Xe drivers)."""
         info = {
@@ -297,6 +342,15 @@ class GPUMonitor:
             util = self._get_intel_gpu_utilization_from_debugfs()
             if util is not None:
                 info['gpu_util'] = int(util)
+            
+            # Try to get GPU memory usage from debugfs
+            mem_info = self._get_intel_gpu_memory_from_debugfs()
+            if mem_info is not None:
+                used_bytes, total_bytes = mem_info
+                info['memory_used'] = used_bytes // (1024 * 1024)  # Convert to MB
+                info['memory_total'] = total_bytes // (1024 * 1024)  # Convert to MB
+                if total_bytes > 0:
+                    info['memory_util'] = int((used_bytes / total_bytes) * 100)
             
             # Legacy code kept for reference (commented out)
             # Try intel_gpu_top for utilization (if available)
