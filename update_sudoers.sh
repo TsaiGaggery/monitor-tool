@@ -25,6 +25,8 @@ $CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/tee /sys/class/drm/card*/device/tile*
 $CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/tee /sys/class/drm/card*/gt_*_freq_mhz
 $CURRENT_USER ALL=(ALL) NOPASSWD: /bin/sh -c echo * > /sys/class/drm/card*/device/tile*/gt*/freq0/*
 $CURRENT_USER ALL=(ALL) NOPASSWD: /bin/sh -c echo * > /sys/class/drm/card*/gt_*_freq_mhz
+# Allow monitor-tool to read GPU debug info without password (for Intel GPU utilization)
+$CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/cat /sys/kernel/debug/dri/*/i915_engine_info
 EOFCFG"
 
 # Fix the variable substitution

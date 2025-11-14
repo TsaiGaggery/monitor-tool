@@ -4,6 +4,7 @@
 import subprocess
 import re
 import os
+import json
 from typing import Dict, List, Optional
 
 
@@ -115,6 +116,100 @@ class GPUMonitor:
             pass
         return False
     
+    def _get_intel_gpu_utilization_from_debugfs(self) -> Optional[float]:
+        """Calculate Intel GPU utilization by reading i915_engine_info twice.
+        
+        This reads /sys/kernel/debug/dri/*/i915_engine_info to get runtime statistics,
+        samples twice with a small interval, and calculates the busy percentage.
+        Requires sudo access to /sys/kernel/debug.
+        
+        Returns:
+            GPU utilization percentage (0-100) or None if unavailable
+        """
+        import time
+        
+        def parse_engine_runtime(content: str) -> Optional[int]:
+            """Parse runtime from i915_engine_info for rcs0 (Render/3D engine).
+            
+            Looking for line like: "        Runtime: 56749864ms"
+            """
+            for line in content.split('\n'):
+                # Look for rcs0 section first
+                if line.strip() == 'rcs0':
+                    # Found rcs0, now look for Runtime in following lines
+                    lines = content.split('\n')
+                    rcs0_idx = lines.index(line)
+                    # Check next ~20 lines for Runtime
+                    for i in range(rcs0_idx, min(rcs0_idx + 20, len(lines))):
+                        if 'Runtime:' in lines[i]:
+                            # Extract runtime value (e.g., "        Runtime: 56749864ms")
+                            parts = lines[i].split('Runtime:')
+                            if len(parts) == 2:
+                                runtime_str = parts[1].strip().replace('ms', '')
+                                try:
+                                    return int(runtime_str)
+                                except ValueError:
+                                    return None
+            return None
+        
+        try:
+            # Find i915_engine_info file by trying to read it with sudo
+            # We can't use os.path.exists() because /sys/kernel/debug requires root
+            engine_info_path = None
+            for variant in ['0000:00:02.0', '1', '128', '0']:
+                path = f'/sys/kernel/debug/dri/{variant}/i915_engine_info'
+                # Try to read it to check if it exists
+                test_result = subprocess.run(['sudo', '-n', 'cat', path],
+                                           capture_output=True, text=True, timeout=1)
+                if test_result.returncode == 0:
+                    engine_info_path = path
+                    break
+            
+            if not engine_info_path:
+                return None
+            
+            # First sample
+            result1 = subprocess.run(['sudo', '-n', 'cat', engine_info_path],
+                                   capture_output=True, text=True, timeout=1)
+            if result1.returncode != 0:
+                return None
+            
+            time1 = time.time()
+            runtime1 = parse_engine_runtime(result1.stdout)
+            
+            if runtime1 is None:
+                return None
+            
+            # Wait 100ms for measurable difference
+            time.sleep(0.1)
+            
+            # Second sample
+            result2 = subprocess.run(['sudo', '-n', 'cat', engine_info_path],
+                                   capture_output=True, text=True, timeout=1)
+            if result2.returncode != 0:
+                return None
+            
+            time2 = time.time()
+            runtime2 = parse_engine_runtime(result2.stdout)
+            
+            if runtime2 is None:
+                return None
+            
+            # Calculate utilization
+            time_delta = (time2 - time1) * 1000  # Convert to ms
+            runtime_delta = runtime2 - runtime1  # Already in ms
+            
+            if time_delta <= 0:
+                return None
+            
+            utilization = (runtime_delta / time_delta) * 100.0
+            
+            # Clamp to 0-100%
+            return max(0.0, min(100.0, utilization))
+            
+        except Exception as e:
+            return None
+    
     def get_intel_info(self) -> Dict:
         """Get Intel GPU information using sysfs (supports i915 and Xe drivers)."""
         info = {
@@ -171,31 +266,39 @@ class GPUMonitor:
                                         with open(cur_freq_path, 'r') as cf:
                                             info['gpu_clock'] = int(cf.read().strip())
                                 
-                                # Estimate GPU utilization based on actual frequency (Xe driver)
-                                # Read min and max frequencies
-                                min_freq_path = f'/sys/class/drm/card{card_num}/device/tile0/gt0/freq0/min_freq'
-                                max_freq_path = f'/sys/class/drm/card{card_num}/device/tile0/gt0/freq0/max_freq'
-                                if os.path.exists(min_freq_path) and os.path.exists(max_freq_path):
-                                    with open(min_freq_path, 'r') as mf:
-                                        min_freq = int(mf.read().strip())
-                                    with open(max_freq_path, 'r') as mxf:
-                                        max_freq = int(mxf.read().strip())
-                                    
-                                    # Estimate utilization based on actual frequency
-                                    # If act_freq is 0, GPU is idle (0% usage)
-                                    if act_freq > 0 and max_freq > min_freq:
-                                        info['gpu_util'] = min(100, int(((act_freq - min_freq) / (max_freq - min_freq)) * 100))
-                                    else:
-                                        info['gpu_util'] = 0
+                                # NOTE: Intel GPU sysfs does not provide actual utilization
+                                # act_freq indicates GPU activity (0 = idle, >0 = active)
+                                # but frequency does NOT equal utilization percentage
+                                # Leave gpu_util as 0 (use intel_gpu_top for real data)
                                 
                             # Try i915 driver frequency (older Intel GPUs)
                             elif os.path.exists(f'/sys/class/drm/card{card_num}/gt_cur_freq_mhz'):
-                                with open(f'/sys/class/drm/card{card_num}/gt_cur_freq_mhz', 'r') as f:
-                                    info['gpu_clock'] = int(f.read().strip())
+                                # Read actual frequency (gt_act_freq_mhz) for i915
+                                act_freq_path = f'/sys/class/drm/card{card_num}/gt_act_freq_mhz'
+                                cur_freq_path = f'/sys/class/drm/card{card_num}/gt_cur_freq_mhz'
+                                
+                                if os.path.exists(act_freq_path):
+                                    with open(act_freq_path, 'r') as f:
+                                        act_freq = int(f.read().strip())
+                                    info['gpu_clock'] = act_freq if act_freq > 0 else 0
+                                else:
+                                    # Fallback to cur_freq if act_freq not available
+                                    with open(cur_freq_path, 'r') as f:
+                                        info['gpu_clock'] = int(f.read().strip())
+                                
+                                # NOTE: Intel GPU sysfs does not provide actual utilization
+                                # Frequency != Utilization, so we leave gpu_util as 0
+                                # Use intel_gpu_top for real utilization (requires sudo)
                             
                             # Found Intel GPU, exit loop
                             break
             
+            # Try to get real GPU utilization from debugfs (fast, direct)
+            util = self._get_intel_gpu_utilization_from_debugfs()
+            if util is not None:
+                info['gpu_util'] = int(util)
+            
+            # Legacy code kept for reference (commented out)
             # Try intel_gpu_top for utilization (if available)
             result = subprocess.run(['which', 'intel_gpu_top'], 
                                   capture_output=True, text=True)
