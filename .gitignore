@@ -1,0 +1,44 @@
+# Python virtual environment
+venv/
+env/
+ENV/
+*.egg-info/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Build artifacts
+build/
+dist/
+*.deb
+*.tar.gz
+*.tar.xz
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Debian packaging
+debian/monitor-tool/
+debian/files
+debian/*.log
+debian/*.substvars
+debian/.debhelper/
+
+# Data
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

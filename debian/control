@@ -1,0 +1,37 @@
+Source: monitor-tool
+Section: utils
+Priority: optional
+Maintainer: Your Name <your.email@example.com>
+Build-Depends: debhelper-compat (= 13),
+               dh-python,
+               python3-all,
+               python3-setuptools,
+               python3-pyqt5,
+               python3-pip
+Standards-Version: 4.6.0
+Homepage: https://github.com/TsaiGaggery/monitor-tool
+
+Package: monitor-tool
+Architecture: all
+Depends: ${python3:Depends},
+         ${misc:Depends},
+         python3 (>= 3.7),
+         python3-pyqt5,
+         python3-pyqt5.qtsvg,
+         python3-psutil,
+         python3-numpy
+Recommends: cpufrequtils,
+            intel-gpu-tools,
+            nvidia-smi
+Description: Real-time system monitoring tool with frequency control
+ System Monitor Tool provides real-time monitoring of CPU, GPU, NPU,
+ and memory usage with a graphical user interface built on PyQt5.
+ .
+ Features include:
+  * Real-time CPU usage and frequency monitoring
+  * GPU monitoring (Intel, NVIDIA, and AMD support)
+  * NPU monitoring (Intel and other platform-specific)
+  * Memory and swap usage tracking
+  * CPU frequency and governor control
+  * Historical data logging to SQLite database
+  * Low-overhead design for minimal system impact

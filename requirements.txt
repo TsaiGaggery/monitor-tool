@@ -1,0 +1,5 @@
+psutil>=5.9.0
+PyQt5>=5.15.0
+pyqtgraph>=0.13.0
+numpy>=1.21.0
+pynvml>=11.5.0

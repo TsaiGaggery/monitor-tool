@@ -1,0 +1,48 @@
+# Configuration for System Monitor Tool
+
+# Update interval in milliseconds
+update_interval: 1000
+
+# Data logging
+logging:
+  enabled: true
+  database_path: ~/.monitor-tool/monitor_data.db
+  cleanup_days: 7  # Remove data older than this many days
+
+# Plot settings
+plots:
+  max_points: 60  # Maximum number of points to display in plots
+  
+# Monitoring
+monitoring:
+  cpu:
+    enabled: true
+    per_core: true
+  
+  memory:
+    enabled: true
+  
+  gpu:
+    enabled: true
+    type: auto  # auto, intel, nvidia, amd, mali
+  
+  npu:
+    enabled: true
+    platform: auto  # auto, intel, rockchip, qualcomm, mediatek, generic
+
+# Frequency control
+frequency_control:
+  enabled: true
+  require_confirmation: true  # Ask for confirmation before changing frequencies
+  
+# UI settings
+ui:
+  theme: light  # light or dark
+  window_size:
+    width: 1200
+    height: 800
+  
+# Advanced settings
+advanced:
+  low_overhead_mode: false  # Reduce update frequency when in background
+  enable_notifications: false  # Desktop notifications for alerts

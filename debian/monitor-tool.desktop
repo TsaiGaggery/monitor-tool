@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=System Monitor Tool
+GenericName=System Monitor
+Comment=Real-time system monitoring with frequency control
+Exec=monitor-tool
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;Monitor;Utility;
+Keywords=monitor;cpu;gpu;npu;memory;performance;frequency;
+StartupNotify=true
