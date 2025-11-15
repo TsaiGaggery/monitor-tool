@@ -224,50 +224,249 @@ MIT License - Issues and PRs welcome!
 **Author**: TsaiGaggery  
 **Version**: 1.0.0
 
-## 主要功能
 
-### 🖥️ 即時監控
-- **CPU 監控**
-  - 整體和各核心使用率
-  - 即時頻率監控
-  - 溫度監測（支援多種感測器）
-  - CPU 統計資訊（上下文切換、中斷等）
+## Key Features
 
-- **GPU 監控**
-  - NVIDIA GPU 支援（透過 pynvml）
-  - AMD GPU 支援（透過 rocm-smi）
-  - GPU 使用率、溫度、記憶體
-  - 時脈速度監控
+### 🖥️ Real-time Monitoring
+- **CPU Monitoring**
+  - Overall and per-core utilization
+  - Real-time frequency monitoring
+  - Temperature monitoring (supports multiple sensors)
+  - CPU statistics (context switches, interrupts, etc.)
 
-- **NPU 監控**
-  - RockChip NPU 支援
-  - Qualcomm、MediaTek、Amlogic 平台支援
-  - 通用 NPU 介面
+- **GPU Monitoring**
+  - NVIDIA GPU support (via pynvml)
+  - AMD GPU support (via rocm-smi)
+  - Intel GPU support (i915/Xe drivers)
+  - GPU utilization, temperature, memory
+  - Clock speed monitoring
+  - Dual-axis plots (usage + frequency)
 
-- **記憶體監控**
-  - RAM 使用情況
-  - Swap 使用情況
-  - 詳細的記憶體分配資訊
+- **NPU Monitoring**
+  - Intel NPU support (Meteor Lake+)
+  - RockChip NPU support
+  - Qualcomm, MediaTek, Amlogic platform support
+  - Generic NPU interface
+  - Utilization and frequency tracking
 
-### ⚙️ 頻率控制
-- CPU 調速器（Governor）控制
-  - Performance、Powersave、Ondemand 等模式
-  - 即時切換
-- CPU 頻率範圍設定
-  - 最小/最大頻率調整
-  - 快速預設模式
+- **Memory Monitoring**
+  - RAM usage
+  - Swap usage
+  - Detailed memory allocation information
 
-### 📊 資料記錄
-- SQLite 資料庫儲存
-- 歷史資料查詢
-- 統計分析
-- 自動清理舊資料
+### ⚙️ Frequency Control
+- CPU Governor control
+  - Performance, Powersave, Ondemand modes
+  - Real-time switching
+- CPU frequency range settings
+  - Min/Max frequency adjustment
+  - Quick preset modes
 
-### 🎨 使用者介面
-- PyQt5 圖形化介面
-- 即時圖表顯示（pyqtgraph）
-- 多分頁設計
-- 低開銷顯示
+### 📊 Data Recording
+- SQLite database storage
+- Historical data queries
+- Statistical analysis
+- Automatic old data cleanup
+- Export to CSV/JSON/HTML formats
+- Interactive HTML charts with zoom/pan
+
+### 🎨 User Interface
+- PyQt5 graphical interface
+- Real-time chart display (pyqtgraph)
+- Multi-tab design
+- Low overhead display
+- Dark theme
+- Color-coded legends for dual-axis plots
+
+## System Requirements
+
+- **Operating System**: Ubuntu 18.04+ or other Debian-based Linux
+- **Python**: 3.7+
+- **Dependencies**:
+  - PyQt5 >= 5.15
+  - pyqtgraph >= 0.12
+  - psutil >= 5.8
+  - pynvml >= 11.5.0 (for NVIDIA GPU support)
+
+## Installation Methods
+
+### Method 1: Using Installation Script (Recommended)
+
+```bash
+git clone https://github.com/TsaiGaggery/monitor-tool.git
+cd monitor-tool
+./scripts/install.sh
+```
+
+The installation script will:
+1. Check and install system dependencies
+2. Create Python virtual environment
+3. Install required Python packages
+4. Create desktop launcher
+5. (Optional) Configure sudoers for frequency control
+
+### Method 2: Build Debian Package
+
+```bash
+./scripts/build-deb.sh
+sudo dpkg -i ../monitor-tool_*.deb
+# Fix dependencies if needed
+sudo apt-get install -f
+```
+
+### Method 3: Manual Installation
+
+```bash
+# Install system dependencies
+sudo apt-get install python3 python3-pip python3-pyqt5
+
+# Create virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Run
+python src/main.py
+```
+
+## Usage
+
+### Starting the Application
+
+```bash
+# Using the launcher script
+./monitor-tool
+
+# Or search for "System Monitor Tool" in application menu
+
+# Or run directly
+source venv/bin/activate
+python src/main.py
+```
+
+### Frequency Control
+
+Frequency control requires root privileges. Options:
+
+1. **Configure sudoers (Recommended)**: Select sudoers configuration during installation
+2. **Run with sudo**: `sudo ./monitor-tool` (not recommended for GUI applications)
+3. **Read-only mode**: Use without frequency control features
+
+### Monitoring Data
+
+- Database location: `~/.monitor-tool/monitor_data.db`
+- Default retention: 7 days of historical data
+- Manual cleanup via menu: "Tools → Cleanup Old Data"
+- Export via menu: "File → Export Data" (CSV, JSON, HTML)
+
+## Project Structure
+
+```
+monitor-tool/
+│   ├── monitors/           # Monitoring modules
+│   │   ├── cpu_monitor.py
+│   │   ├── gpu_monitor.py
+│   │   ├── npu_monitor.py
+│   │   └── memory_monitor.py
+│   ├── controllers/        # Control modules
+│   │   └── frequency_controller.py
+│   ├── ui/                # UI modules
+│   │   ├── main_window.py
+│   │   └── widgets/
+│   ├── storage/           # Data storage
+│   │   └── data_logger.py
+│   └── main.py           # Main entry point
+├── scripts/              # Installation/build scripts
+│   ├── install.sh
+│   ├── uninstall.sh
+│   └── build-deb.sh
+├── debian/              # Debian packaging files
+│   ├── control
+│   ├── rules
+│   └── postinst
+├── config/              # Configuration files
+│   └── default.yaml
+├── requirements.txt     # Python dependencies
+├── monitor-tool        # Launcher script
+└── README.md
+```
+
+## Configuration
+
+Configuration file is located at `config/default.yaml`, where you can adjust:
+
+- Update interval
+- Data logging settings
+- Chart display points
+- UI theme
+- Module enable/disable switches
+
+## Uninstallation
+
+```bash
+./scripts/uninstall.sh
+```
+
+Or if installed via Debian package:
+
+```bash
+sudo apt-get remove monitor-tool
+```
+
+## Frequently Asked Questions
+
+### Q: Why don't I see GPU information?
+A: Ensure the corresponding GPU tools are installed:
+- NVIDIA: `nvidia-smi`, drivers, `pynvml`
+- AMD: `rocm-smi`
+- Intel: Kernel support for i915/Xe drivers
+
+### Q: Frequency control doesn't work?
+A: Root privileges are required. Run `./scripts/install.sh` and select sudoers configuration, or run the program with sudo.
+
+### Q: NPU monitoring shows unavailable?
+A: NPU monitoring depends on hardware platform and driver support. Currently supports RockChip, Qualcomm, MediaTek, and Intel (Meteor Lake+) platforms.
+
+### Q: How to reduce system overhead?
+A: You can adjust in the configuration file:
+- Increase `update_interval` (e.g., change to 2000ms)
+- Reduce `max_points`
+- Enable `low_overhead_mode`
+
+## Technical Features
+
+- **Low overhead design**: Minimal system impact
+- **Modular architecture**: Easy to extend and maintain
+- **Cross-platform support**: Supports multiple GPU/NPU platforms
+- **Real-time visualization**: High-performance charts using pyqtgraph
+- **Data persistence**: SQLite storage for historical data
+- **Comprehensive exports**: Interactive HTML reports with 13+ charts
+- **Dual-axis plots**: Visualize usage and frequency together
+
+## License
+
+MIT License - See `debian/copyright` for details
+
+## Contributing
+
+Issues and Pull Requests are welcome!
+
+## Author
+
+TsaiGaggery
+
+## Changelog
+
+### v1.0.0
+- Initial release
+- CPU/GPU/NPU/Memory monitoring
+- Frequency control
+- Data logging
+- Export to CSV/JSON/HTML
+- Dual-axis real-time plots
+
 
 ## 系統需求
 

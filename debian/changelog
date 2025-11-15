@@ -1,3 +1,16 @@
+monitor-tool (1.1.0) unstable; urgency=medium
+
+  * Add dual-axis real-time plots for GPU/NPU (usage + frequency)
+  * Fix GPU frequency reading to use actual frequency (act_freq)
+  * Add comprehensive data export with 13+ interactive charts
+  * Add per-core CPU frequency and temperature monitoring
+  * Add Intel NPU monitoring support
+  * Fix Intel Xe GPU memory reading
+  * Improve color-coded legends with visual indicators
+  * Support for Intel i915 and Xe GPU drivers
+
+ -- TsaiGaggery <your.email@example.com>  Thu, 14 Nov 2025 00:00:00 +0000
+
 monitor-tool (1.0.0) unstable; urgency=medium
 
   * Initial release
@@ -10,3 +23,4 @@ monitor-tool (1.0.0) unstable; urgency=medium
   * NPU monitoring for Intel and other platforms
 
  -- Your Name <your.email@example.com>  Thu, 14 Nov 2024 00:00:00 +0000
+
