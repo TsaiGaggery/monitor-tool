@@ -1,350 +1,697 @@
-# System Monitor Tool
+# System Monitor Tool# System Monitor Tool
 
-A unified Linux system monitoring dashboard for real-time CPU, GPU, NPU, and memory monitoring with frequency control.
 
-![Python](https://img.shields.io/badge/python-3.7+-blue.svg)
-![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)
-![License](https://img.shields.io/badge/license-MIT-green.svg)
 
-## Features
+A comprehensive Linux system monitoring dashboard for real-time CPU, GPU, NPU, and memory monitoring with frequency control.A unified Linux system monitoring dashboard for real-time CPU, GPU, NPU, and memory monitoring with frequency control.
 
-**All-in-One Dashboard** - Single PyQt5 interface showing:
+
+
+![Python](https://img.shields.io/badge/python-3.8+-blue.svg)![Python](https://img.shields.io/badge/python-3.7+-blue.svg)
+
+![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)
+
+![License](https://img.shields.io/badge/license-MIT-green.svg)![License](https://img.shields.io/badge/license-MIT-green.svg)
+
+
+
+[中文说明](README_zh.md)## Features
+
+
+
+## Features**All-in-One Dashboard** - Single PyQt5 interface showing:
+
 - 📊 CPU usage, frequency, temperature (per-core)
-- 🎮 GPU monitoring (Intel/NVIDIA/AMD)
-- 🧠 NPU monitoring (Intel Meteor Lake+)
-- 💾 Memory & swap usage
-- ⚙️ CPU frequency & governor control
-- 📈 Real-time charts with historical data logging
+
+### 🖥️ Real-time Monitoring- 🎮 GPU monitoring (Intel/NVIDIA/AMD)
+
+- **CPU Monitoring**- 🧠 NPU monitoring (Intel Meteor Lake+)
+
+  - Overall and per-core utilization- 💾 Memory & swap usage
+
+  - Real-time frequency monitoring- ⚙️ CPU frequency & governor control
+
+  - Temperature monitoring (multiple sensors support)- 📈 Real-time charts with historical data logging
+
+  - CPU statistics (context switches, interrupts)
 
 ## Quick Start
 
-### 1. Install
-```bash
-./scripts/install.sh
-```
+- **GPU Monitoring**
 
-The script installs all dependencies and creates a launcher.
+  - NVIDIA GPU support (via pynvml)### 1. Install
 
-### 2. Run
-```bash
-./monitor-tool
-```
+  - AMD GPU support (via rocm-smi)```bash
+
+  - Intel GPU support (i915/Xe drivers)./scripts/install.sh
+
+  - GPU utilization, temperature, memory```
+
+  - Clock speed monitoring
+
+  - Dual-axis plots (usage + frequency)The script installs all dependencies and creates a launcher.
+
+
+
+- **NPU Monitoring**### 2. Run
+
+  - Intel NPU support (Meteor Lake+)```bash
+
+  - RockChip, Qualcomm, MediaTek platform support./monitor-tool
+
+  - Utilization and frequency tracking```
+
+  - Dual-axis real-time visualization
 
 Or search "System Monitor Tool" in your application menu.
 
-That's it! The dashboard will open showing all monitoring data in one window.
+- **Memory Monitoring**
 
-## System Requirements
+  - RAM usage with detailed breakdownThat's it! The dashboard will open showing all monitoring data in one window.
 
-- **OS**: Ubuntu 18.04+ or Debian-based Linux
-- **Python**: 3.7+
-- **Hardware**: Intel/NVIDIA/AMD GPU (optional), Intel NPU (Meteor Lake+, optional)
+  - Swap usage tracking
+
+  - Historical trends## System Requirements
+
+
+
+### ⚙️ Frequency Control- **OS**: Ubuntu 18.04+ or Debian-based Linux
+
+- CPU Governor control (Performance, Powersave, Ondemand)- **Python**: 3.7+
+
+- Min/Max frequency adjustment- **Hardware**: Intel/NVIDIA/AMD GPU (optional), Intel NPU (Meteor Lake+, optional)
+
+- Quick performance presets
 
 ## Dashboard Layout
 
-The unified dashboard displays:
+### 📊 Data Recording & Export
 
-```
-┌─────────────────────────────────────────────────────┐
-│  Overview Tab                                       │
+- SQLite database storageThe unified dashboard displays:
+
+- Automatic data retention management (7 days default)
+
+- Export formats: CSV, JSON, HTML```
+
+- Interactive HTML reports with 13+ charts┌─────────────────────────────────────────────────────┐
+
+- Zoom, pan, and filter capabilities│  Overview Tab                                       │
+
 │  ├─ CPU Usage Chart                                 │
-│  ├─ Memory Usage Chart                              │
-│  └─ System Info Summary                             │
+
+### 🎨 User Interface│  ├─ Memory Usage Chart                              │
+
+- PyQt5 graphical interface│  └─ System Info Summary                             │
+
+- High-performance real-time charts (pyqtgraph)│                                                      │
+
+- Multi-tab layout│  CPU Tab                                            │
+
+- Dark theme│  ├─ Per-core usage                                  │
+
+- Color-coded dual-axis legends│  ├─ Frequency & Temperature                         │
+
+- Low system overhead│  └─ Real-time frequency chart                       │
+
 │                                                      │
-│  CPU Tab                                            │
-│  ├─ Per-core usage                                  │
-│  ├─ Frequency & Temperature                         │
-│  └─ Real-time frequency chart                       │
-│                                                      │
-│  Memory Tab                                         │
+
+## Quick Start│  Memory Tab                                         │
+
 │  ├─ RAM & Swap usage                                │
-│  └─ Usage history chart                             │
-│                                                      │
-│  GPU Tab (if detected)                              │
-│  ├─ GPU usage, temp, memory                         │
-│  └─ Clock speed chart                               │
-│                                                      │
+
+### 1. Install│  └─ Usage history chart                             │
+
+```bash│                                                      │
+
+git clone https://github.com/TsaiGaggery/monitor-tool.git│  GPU Tab (if detected)                              │
+
+cd monitor-tool│  ├─ GPU usage, temp, memory                         │
+
+./scripts/install.sh│  └─ Clock speed chart                               │
+
+```│                                                      │
+
 │  NPU Tab (if detected)                              │
-│  ├─ NPU utilization                                 │
-│  └─ Frequency monitoring                            │
-│                                                      │
-│  Control Panel (sidebar)                            │
-│  ├─ CPU Governor selector                           │
-│  ├─ Frequency range control                         │
+
+The script will:│  ├─ NPU utilization                                 │
+
+- Install system dependencies│  └─ Frequency monitoring                            │
+
+- Create Python virtual environment│                                                      │
+
+- Install required packages│  Control Panel (sidebar)                            │
+
+- Create desktop launcher│  ├─ CPU Governor selector                           │
+
+- (Optional) Configure sudoers for frequency control│  ├─ Frequency range control                         │
+
 │  └─ Performance presets                             │
-└─────────────────────────────────────────────────────┘
-```
 
-## Configuration
+### 2. Run└─────────────────────────────────────────────────────┘
 
-Edit `config/default.yaml` to customize:
+```bash```
+
+./monitor-tool
+
+```## Configuration
+
+
+
+Or search "System Monitor Tool" in your application menu.Edit `config/default.yaml` to customize:
+
 - Update interval (default: 1000ms)
-- Chart display points (default: 60)
+
+## Installation Methods- Chart display points (default: 60)
+
 - Data retention (default: 7 days)
 
-## Advanced Usage
+### Method 1: Installation Script (Recommended)
 
-### Frequency Control (requires sudo)
+```bash## Advanced Usage
+
+./scripts/install.sh
+
+```### Frequency Control (requires sudo)
+
 The installer can configure passwordless sudo for frequency control.
-During installation, select "yes" when prompted.
 
-### Data Export
-Monitoring data is stored in `~/.monitor-tool/monitor_data.db`
-```bash
-sqlite3 ~/.monitor-tool/monitor_data.db "SELECT * FROM monitoring_data LIMIT 10;"
-```
+### Method 2: Build Debian PackageDuring installation, select "yes" when prompted.
 
-### Manual Installation
 ```bash
-sudo apt-get install python3 python3-pip python3-pyqt5
-python3 -m venv venv
+
+# Install build dependencies### Data Export
+
+sudo apt-get install devscripts debhelper dh-python python3-allMonitoring data is stored in `~/.monitor-tool/monitor_data.db`
+
+```bash
+
+# Build the packagesqlite3 ~/.monitor-tool/monitor_data.db "SELECT * FROM monitoring_data LIMIT 10;"
+
+dpkg-buildpackage -us -uc -b```
+
+
+
+# Install### Manual Installation
+
+sudo dpkg -i ../monitor-tool_1.1.0_all.deb```bash
+
+sudo apt-get install -f  # Fix dependencies if neededsudo apt-get install python3 python3-pip python3-pyqt5
+
+```python3 -m venv venv
+
 source venv/bin/activate
-pip install -r requirements.txt
-python src/main.py
-```
 
-### Build Debian Package
+The Debian package includes:pip install -r requirements.txt
+
+- All source files in `/usr/share/monitor-tool/`python src/main.py
+
+- Launcher script in `/usr/bin/monitor-tool````
+
+- Desktop entry for application menu
+
+- Automatic dependency management### Build Debian Package
+
 ```bash
-./scripts/build-deb.sh
-sudo dpkg -i ../monitor-tool_*.deb
-```
+
+### Method 3: Manual Installation./scripts/build-deb.sh
+
+```bashsudo dpkg -i ../monitor-tool_*.deb
+
+# Install system dependencies```
+
+sudo apt-get install python3 python3-pip python3-pyqt5
 
 ## Troubleshooting
 
-**"could not connect to display" error?**
-This means you're not in a graphical environment. Try:
+# Create virtual environment
+
+python3 -m venv venv**"could not connect to display" error?**
+
+source venv/bin/activateThis means you're not in a graphical environment. Try:
+
 ```bash
-# If on local machine, ensure you're in a graphical session
-# Switch to GUI: Ctrl+Alt+F7 or Ctrl+Alt+F1
 
-# If using SSH, enable X forwarding
-ssh -X user@hostname
-./monitor-tool
+# Install Python dependencies# If on local machine, ensure you're in a graphical session
 
-# Or set DISPLAY manually
+pip install -r requirements.txt# Switch to GUI: Ctrl+Alt+F7 or Ctrl+Alt+F1
+
+
+
+# Run# If using SSH, enable X forwarding
+
+python src/main.pyssh -X user@hostname
+
+```./monitor-tool
+
+
+
+## System Requirements# Or set DISPLAY manually
+
 DISPLAY=:0 ./monitor-tool
 
-# Alternative: Use systemd user service (see below)
-```
+- **OS**: Ubuntu 18.04+ or Debian-based Linux
 
-**GPU not showing?**
+- **Python**: 3.8+# Alternative: Use systemd user service (see below)
+
+- **Hardware**: ```
+
+  - Intel/NVIDIA/AMD GPU (optional)
+
+  - Intel NPU (Meteor Lake+, optional)**GPU not showing?**
+
 ```bash
-# Intel GPU
+
+## Dashboard Layout# Intel GPU
+
 lspci | grep -i vga
-ls -l /sys/class/drm/card0
-sudo apt install intel-gpu-tools  # Optional: provides intel_gpu_top
 
-# NVIDIA GPU
-lspci | grep -i nvidia
-nvidia-smi  # Requires NVIDIA drivers
+```ls -l /sys/class/drm/card0
 
-# AMD GPU
-rocm-smi
-```
+┌─────────────────────────────────────────────────────┐sudo apt install intel-gpu-tools  # Optional: provides intel_gpu_top
 
-**GPU usage shows 0%?**
+│  Overview Tab                                       │
 
-This is normal when GPU is idle. GPU usage monitoring varies by hardware:
+│  ├─ CPU Usage Chart                                 │# NVIDIA GPU
 
-- **Intel Xe GPU**: Estimated from frequency (act_freq). Usage increases when running graphics applications
-- **Intel i915 GPU**: Requires `intel_gpu_top` (sudo access)
-- **NVIDIA GPU**: Requires NVIDIA drivers installed
-  ```bash
-  sudo apt install nvidia-driver-550  # Or recommended version
-  sudo reboot
-  ```
-- **AMD GPU**: Requires ROCm drivers
+│  ├─ Memory Usage Chart                              │lspci | grep -i nvidia
 
-To test GPU monitoring, run a graphics workload:
-```bash
-# Simple GPU load test
-sudo apt install mesa-utils
-glxgears  # Watch GPU usage increase in dashboard
+│  └─ System Info Summary                             │nvidia-smi  # Requires NVIDIA drivers
+
+│                                                      │
+
+│  CPU Tab                                            │# AMD GPU
+
+│  ├─ Per-core usage (first 4 visible by default)     │rocm-smi
+
+│  ├─ Frequency & Temperature                         │```
+
+│  └─ Real-time charts                                │
+
+│                                                      │**GPU usage shows 0%?**
+
+│  Memory Tab                                         │
+
+│  ├─ RAM & Swap usage                                │This is normal when GPU is idle. GPU usage monitoring varies by hardware:
+
+│  └─ Historical trends                               │
+
+│                                                      │- **Intel Xe GPU**: Estimated from frequency (act_freq). Usage increases when running graphics applications
+
+│  GPU Tab (if detected)                              │- **Intel i915 GPU**: Requires `intel_gpu_top` (sudo access)
+
+│  ├─ Usage & Frequency (dual-axis)                   │- **NVIDIA GPU**: Requires NVIDIA drivers installed
+
+│  ├─ Temperature & Power                             │  ```bash
+
+│  └─ Memory utilization                              │  sudo apt install nvidia-driver-550  # Or recommended version
+
+│                                                      │  sudo reboot
+
+│  NPU Tab (if detected)                              │  ```
+
+│  ├─ Utilization & Frequency (dual-axis)             │- **AMD GPU**: Requires ROCm drivers
+
+│  └─ Memory usage                                    │
+
+│                                                      │To test GPU monitoring, run a graphics workload:
+
+│  Control Panel (sidebar)                            │```bash
+
+│  ├─ CPU Governor selector                           │# Simple GPU load test
+
+│  ├─ Frequency range control                         │sudo apt install mesa-utils
+
+│  └─ Performance presets                             │glxgears  # Watch GPU usage increase in dashboard
+
+└─────────────────────────────────────────────────────┘```
+
 ```
 
 **NPU not detected?**
-```bash
+
+## Configuration```bash
+
 # Intel NPU (Meteor Lake+, requires kernel 6.2+)
-lspci | grep -i vpu
-ls -l /sys/class/accel/accel0
-```
 
-**Frequency control not working?**
+Edit `config/default.yaml` to customize:lspci | grep -i vpu
+
+- Update interval (default: 1000ms)ls -l /sys/class/accel/accel0
+
+- Chart display points (default: 60)```
+
+- Data retention (default: 7 days)
+
+- Low overhead mode**Frequency control not working?**
+
 - Re-run `./scripts/install.sh` and select sudoers configuration
-- Or run with sudo: `sudo ./monitor-tool` (not recommended)
 
-**Reduce system overhead?**
-- Edit `config/default.yaml`, increase `update_interval` to 2000ms
+## Advanced Usage- Or run with sudo: `sudo ./monitor-tool` (not recommended)
 
-## Running as Systemd User Service (Optional)
 
-For automatic startup with graphical session:
 
-```bash
-# Create service file
+### Frequency Control (requires sudo)**Reduce system overhead?**
+
+During installation, select "yes" for sudoers configuration to enable passwordless frequency control.- Edit `config/default.yaml`, increase `update_interval` to 2000ms
+
+
+
+### Data Export## Running as Systemd User Service (Optional)
+
+Export monitoring data via menu: **File → Export Data**
+
+- **CSV**: For spreadsheet analysisFor automatic startup with graphical session:
+
+- **JSON**: For programmatic access
+
+- **HTML**: Interactive charts with zoom/pan```bash
+
+- **Export All (Ctrl+E)**: All formats at once# Create service file
+
 mkdir -p ~/.config/systemd/user/
-cat > ~/.config/systemd/user/monitor-tool.service << EOF
-[Unit]
-Description=System Monitor Tool
-After=graphical-session.target
 
-[Service]
-Type=simple
+Exported files include:cat > ~/.config/systemd/user/monitor-tool.service << EOF
+
+- All monitoring metrics[Unit]
+
+- Real timestamps (not seconds)Description=System Monitor Tool
+
+- Per-core CPU dataAfter=graphical-session.target
+
+- GPU temperature, power, frequency
+
+- Memory details (used/available)[Service]
+
+- NPU metrics (if available)Type=simple
+
 ExecStart=/home/$USER/monitor-tool/monitor-tool
-Restart=on-failure
 
-[Install]
-WantedBy=default.target
-EOF
+Data location: `~/.monitor-tool/monitor_data.db`Restart=on-failure
+
+
+
+### Query Historical Data[Install]
+
+```bashWantedBy=default.target
+
+sqlite3 ~/.monitor-tool/monitor_data.db "SELECT * FROM monitoring_data ORDER BY timestamp DESC LIMIT 10;"EOF
+
+```
 
 # Enable and start
-systemctl --user daemon-reload
+
+## Troubleshootingsystemctl --user daemon-reload
+
 systemctl --user enable monitor-tool
-systemctl --user start monitor-tool
+
+### "could not connect to display" error?systemctl --user start monitor-tool
+
+```bash```
+
+# On local machine - ensure graphical session
+
+# Switch to GUI: Ctrl+Alt+F7## Uninstall
+
+```bash
+
+# Via SSH - enable X forwarding./scripts/uninstall.sh
+
+ssh -X user@hostname```
+
+./monitor-tool
+
+## Platform Support
+
+# Or set DISPLAY
+
+DISPLAY=:0 ./monitor-tool| Component | Intel | NVIDIA | AMD | ARM |
+
+```|-----------|-------|--------|-----|-----|
+
+| CPU | ✅ | ✅ | ✅ | ✅ |
+
+### GPU not showing?| GPU | ✅ | ✅ | ✅ | ✅ |
+
+```bash| NPU | ✅ (Meteor Lake+) | ❌ | ❌ | 🟡 (Platform-specific) |
+
+# Check GPU detection| Frequency Control | ✅ | ❌ | ❌ | 🟡 |
+
+lspci | grep -i vga
+
+## License & Contributing
+
+# Intel GPU
+
+ls -l /sys/class/drm/card*MIT License - Issues and PRs welcome!
+
+sudo apt install intel-gpu-tools  # Optional
+
+**Author**: TsaiGaggery  
+
+# NVIDIA GPU**Version**: 1.0.0
+
+nvidia-smi
+
+sudo apt install nvidia-driver-550  # If missing
+
+## Key Features
+
+# AMD GPU
+
+rocm-smi### 🖥️ Real-time Monitoring
+
+```- **CPU Monitoring**
+
+  - Overall and per-core utilization
+
+### GPU usage shows 0%?  - Real-time frequency monitoring
+
+This is normal when GPU is idle. Test with:  - Temperature monitoring (supports multiple sensors)
+
+```bash  - CPU statistics (context switches, interrupts, etc.)
+
+sudo apt install mesa-utils
+
+glxgears  # Watch GPU usage increase- **GPU Monitoring**
+
+```  - NVIDIA GPU support (via pynvml)
+
+  - AMD GPU support (via rocm-smi)
+
+GPU monitoring varies by hardware:  - Intel GPU support (i915/Xe drivers)
+
+- **Intel Xe GPU**: Uses actual frequency (act_freq), 0 when idle  - GPU utilization, temperature, memory
+
+- **Intel i915 GPU**: Requires `intel_gpu_top` (sudo)  - Clock speed monitoring
+
+- **NVIDIA GPU**: Requires NVIDIA drivers  - Dual-axis plots (usage + frequency)
+
+- **AMD GPU**: Requires ROCm drivers
+
+- **NPU Monitoring**
+
+### NPU not detected?  - Intel NPU support (Meteor Lake+)
+
+```bash  - RockChip NPU support
+
+# Check NPU hardware (Intel Meteor Lake+, kernel 6.2+)  - Qualcomm, MediaTek, Amlogic platform support
+
+lspci | grep -i vpu  - Generic NPU interface
+
+ls -l /sys/class/accel/accel0  - Utilization and frequency tracking
+
 ```
 
-## Uninstall
-```bash
-./scripts/uninstall.sh
+- **Memory Monitoring**
+
+### Frequency control not working?  - RAM usage
+
+- Re-run `./scripts/install.sh` and select sudoers configuration  - Swap usage
+
+- Or run with sudo: `sudo ./monitor-tool` (not recommended for GUI)  - Detailed memory allocation information
+
+
+
+### Reduce system overhead?### ⚙️ Frequency Control
+
+Edit `config/default.yaml`:- CPU Governor control
+
+```yaml  - Performance, Powersave, Ondemand modes
+
+update_interval: 2000  # Increase to 2 seconds  - Real-time switching
+
+```- CPU frequency range settings
+
+  - Min/Max frequency adjustment
+
+## Project Structure  - Quick preset modes
+
+
+
+```### 📊 Data Recording
+
+monitor-tool/- SQLite database storage
+
+├── src/- Historical data queries
+
+│   ├── monitors/           # Monitoring modules- Statistical analysis
+
+│   │   ├── cpu_monitor.py- Automatic old data cleanup
+
+│   │   ├── gpu_monitor.py- Export to CSV/JSON/HTML formats
+
+│   │   ├── npu_monitor.py- Interactive HTML charts with zoom/pan
+
+│   │   └── memory_monitor.py
+
+│   ├── controllers/        # Control modules### 🎨 User Interface
+
+│   │   └── freq_controller.py- PyQt5 graphical interface
+
+│   ├── ui/                # UI modules- Real-time chart display (pyqtgraph)
+
+│   │   ├── main_window.py- Multi-tab design
+
+│   │   ├── widgets/- Low overhead display
+
+│   │   └── styles/- Dark theme
+
+│   ├── storage/           # Data storage- Color-coded legends for dual-axis plots
+
+│   │   ├── data_logger.py
+
+│   │   └── data_exporter.py## System Requirements
+
+│   └── main.py           # Main entry
+
+├── scripts/              # Installation/build scripts- **Operating System**: Ubuntu 18.04+ or other Debian-based Linux
+
+│   ├── install.sh- **Python**: 3.7+
+
+│   ├── uninstall.sh- **Dependencies**:
+
+│   └── build-deb.sh  - PyQt5 >= 5.15
+
+├── debian/              # Debian packaging  - pyqtgraph >= 0.12
+
+│   ├── control  - psutil >= 5.8
+
+│   ├── rules  - pynvml >= 11.5.0 (for NVIDIA GPU support)
+
+│   ├── changelog
+
+│   └── postinst## Installation Methods
+
+├── config/              # Configuration
+
+│   └── default.yaml### Method 1: Using Installation Script (Recommended)
+
+├── requirements.txt     # Python dependencies
+
+├── setup.py            # Python package setup```bash
+
+├── monitor-tool        # Launcher scriptgit clone https://github.com/TsaiGaggery/monitor-tool.git
+
+└── README.mdcd monitor-tool
+
+```./scripts/install.sh
+
 ```
 
 ## Platform Support
 
-| Component | Intel | NVIDIA | AMD | ARM |
-|-----------|-------|--------|-----|-----|
-| CPU | ✅ | ✅ | ✅ | ✅ |
-| GPU | ✅ | ✅ | ✅ | ✅ |
-| NPU | ✅ (Meteor Lake+) | ❌ | ❌ | 🟡 (Platform-specific) |
-| Frequency Control | ✅ | ❌ | ❌ | 🟡 |
-
-## License & Contributing
-
-MIT License - Issues and PRs welcome!
-
-**Author**: TsaiGaggery  
-**Version**: 1.0.0
-
-
-## Key Features
-
-### 🖥️ Real-time Monitoring
-- **CPU Monitoring**
-  - Overall and per-core utilization
-  - Real-time frequency monitoring
-  - Temperature monitoring (supports multiple sensors)
-  - CPU statistics (context switches, interrupts, etc.)
-
-- **GPU Monitoring**
-  - NVIDIA GPU support (via pynvml)
-  - AMD GPU support (via rocm-smi)
-  - Intel GPU support (i915/Xe drivers)
-  - GPU utilization, temperature, memory
-  - Clock speed monitoring
-  - Dual-axis plots (usage + frequency)
-
-- **NPU Monitoring**
-  - Intel NPU support (Meteor Lake+)
-  - RockChip NPU support
-  - Qualcomm, MediaTek, Amlogic platform support
-  - Generic NPU interface
-  - Utilization and frequency tracking
-
-- **Memory Monitoring**
-  - RAM usage
-  - Swap usage
-  - Detailed memory allocation information
-
-### ⚙️ Frequency Control
-- CPU Governor control
-  - Performance, Powersave, Ondemand modes
-  - Real-time switching
-- CPU frequency range settings
-  - Min/Max frequency adjustment
-  - Quick preset modes
-
-### 📊 Data Recording
-- SQLite database storage
-- Historical data queries
-- Statistical analysis
-- Automatic old data cleanup
-- Export to CSV/JSON/HTML formats
-- Interactive HTML charts with zoom/pan
-
-### 🎨 User Interface
-- PyQt5 graphical interface
-- Real-time chart display (pyqtgraph)
-- Multi-tab design
-- Low overhead display
-- Dark theme
-- Color-coded legends for dual-axis plots
-
-## System Requirements
-
-- **Operating System**: Ubuntu 18.04+ or other Debian-based Linux
-- **Python**: 3.7+
-- **Dependencies**:
-  - PyQt5 >= 5.15
-  - pyqtgraph >= 0.12
-  - psutil >= 5.8
-  - pynvml >= 11.5.0 (for NVIDIA GPU support)
-
-## Installation Methods
-
-### Method 1: Using Installation Script (Recommended)
-
-```bash
-git clone https://github.com/TsaiGaggery/monitor-tool.git
-cd monitor-tool
-./scripts/install.sh
-```
-
 The installation script will:
-1. Check and install system dependencies
-2. Create Python virtual environment
-3. Install required Python packages
-4. Create desktop launcher
-5. (Optional) Configure sudoers for frequency control
+
+| Component | Intel | NVIDIA | AMD | ARM |1. Check and install system dependencies
+
+|-----------|-------|--------|-----|-----|2. Create Python virtual environment
+
+| CPU | ✅ | ✅ | ✅ | ✅ |3. Install required Python packages
+
+| GPU | ✅ | ✅ | ✅ | ✅ |4. Create desktop launcher
+
+| NPU | ✅ (Meteor Lake+) | ❌ | ❌ | 🟡 |5. (Optional) Configure sudoers for frequency control
+
+| Freq Control | ✅ | ❌ | ❌ | 🟡 |
 
 ### Method 2: Build Debian Package
 
+## Uninstall
+
 ```bash
-./scripts/build-deb.sh
-sudo dpkg -i ../monitor-tool_*.deb
-# Fix dependencies if needed
+
+```bash./scripts/build-deb.sh
+
+# If installed via scriptsudo dpkg -i ../monitor-tool_*.deb
+
+./scripts/uninstall.sh# Fix dependencies if needed
+
 sudo apt-get install -f
-```
 
-### Method 3: Manual Installation
+# If installed via Debian package```
 
-```bash
+sudo apt-get remove monitor-tool
+
+```### Method 3: Manual Installation
+
+
+
+## License```bash
+
 # Install system dependencies
-sudo apt-get install python3 python3-pip python3-pyqt5
 
-# Create virtual environment
+MIT License - See `debian/copyright` for detailssudo apt-get install python3 python3-pip python3-pyqt5
+
+
+
+## Contributing# Create virtual environment
+
 python3 -m venv venv
-source venv/bin/activate
 
-# Install Python dependencies
+Issues and Pull Requests are welcome!source venv/bin/activate
+
+
+
+## Author# Install Python dependencies
+
 pip install -r requirements.txt
 
+**TsaiGaggery**
+
 # Run
-python src/main.py
+
+## Changelogpython src/main.py
+
 ```
 
-## Usage
+### v1.1.0 (2025-11-15)
 
-### Starting the Application
+- Add Debian package support## Usage
 
-```bash
-# Using the launcher script
-./monitor-tool
+- Add dual-axis real-time plots (usage + frequency)
 
-# Or search for "System Monitor Tool" in application menu
+- Fix GPU frequency reading (always use actual frequency)### Starting the Application
 
-# Or run directly
-source venv/bin/activate
-python src/main.py
-```
+- Add color-coded legends for dual-axis charts
+
+- Translate all documentation to English```bash
+
+- Export all formats feature (Ctrl+E)# Using the launcher script
+
+- Comprehensive HTML reports with 13+ interactive charts./monitor-tool
+
+
+
+### v1.0.0 (2024-11-14)# Or search for "System Monitor Tool" in application menu
+
+- Initial release
+
+- CPU/GPU/NPU/Memory monitoring# Or run directly
+
+- Frequency controlsource venv/bin/activate
+
+- Data logging and exportpython src/main.py
+
+- PyQt5 GUI with real-time charts```
+
 
 ### Frequency Control
 

@@ -192,17 +192,26 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
 # Allow monitor-tool to control CPU frequencies without password
 $CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/tee /sys/devices/system/cpu/cpu*/cpufreq/*
 $CURRENT_USER ALL=(ALL) NOPASSWD: /bin/sh -c echo * > /sys/devices/system/cpu/cpu*/cpufreq/*
-# Allow monitor-tool to control GPU frequencies without password
+# Allow monitor-tool to control GPU frequencies without password (Intel Xe/i915)
 $CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/tee /sys/class/drm/card*/device/tile*/gt*/freq0/*
 $CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/tee /sys/class/drm/card*/gt_*_freq_mhz
 $CURRENT_USER ALL=(ALL) NOPASSWD: /bin/sh -c echo * > /sys/class/drm/card*/device/tile*/gt*/freq0/*
 $CURRENT_USER ALL=(ALL) NOPASSWD: /bin/sh -c echo * > /sys/class/drm/card*/gt_*_freq_mhz
 # Allow monitor-tool to run intel_gpu_top without password (for Intel GPU utilization)
 $CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/intel_gpu_top
+# Allow monitor-tool to read GPU debug info without password (for Intel GPU utilization)
+$CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/cat /sys/kernel/debug/dri/*/i915_engine_info
+$CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/cat /sys/kernel/debug/dri/*/i915_gem_objects
+# Allow monitor-tool to access NPU debug info without password (Intel NPU, if needed)
+$CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/cat /sys/kernel/debug/dri/*/i915_vpu_usage
+$CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/cat /sys/kernel/debug/npu/*
+# Allow monitor-tool to control NPU frequencies without password (if writeable in future)
+$CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/tee /sys/class/accel/accel*/device/npu_*
+$CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/tee /sys/class/devfreq/*/npu/*
 EOF"
     
     sudo chmod 0440 "$SUDOERS_FILE"
-    echo -e "${GREEN}Sudoers configuration created (CPU + GPU frequency control + intel_gpu_top)${NC}"
+    echo -e "${GREEN}Sudoers configuration created (CPU/GPU/NPU frequency control + monitoring)${NC}"
 else
     echo "Skipped. You'll need to run with sudo for frequency control."
 fi
