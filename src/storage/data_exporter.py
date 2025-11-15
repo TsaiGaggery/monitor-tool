@@ -16,16 +16,20 @@ class DataExporter:
         """Initialize data exporter.
         
         Args:
-            output_dir: Directory to save exported files. Defaults to ~/monitor-tool-exports/
+            output_dir: Base directory to save exported files. Defaults to ./reports/
         """
         if output_dir is None:
-            output_dir = os.path.expanduser('~/monitor-tool-exports')
+            # Use reports directory in project root
+            output_dir = 'reports'
         
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        
+        self.base_output_dir = Path(output_dir)
         self.session_data = []
         self.start_time = datetime.now()
+        
+        # Create date-based subdirectory (YYYY-MM-DD format)
+        date_str = self.start_time.strftime('%Y-%m-%d')
+        self.output_dir = self.base_output_dir / date_str
+        self.output_dir.mkdir(parents=True, exist_ok=True)
     
     def add_sample(self, data: Dict):
         """Add a monitoring sample to the session.
@@ -348,6 +352,11 @@ class DataExporter:
         """Clear current session data and start a new session."""
         self.session_data = []
         self.start_time = datetime.now()
+        
+        # Update output directory to new date
+        date_str = self.start_time.strftime('%Y-%m-%d')
+        self.output_dir = self.base_output_dir / date_str
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
 
 if __name__ == '__main__':

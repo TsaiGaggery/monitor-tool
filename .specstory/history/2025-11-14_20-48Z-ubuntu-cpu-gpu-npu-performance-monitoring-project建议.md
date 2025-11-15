@@ -5584,7 +5584,7 @@ _**Agent (model copilot/claude-sonnet-4.5)**_
 
 ---
 
-_**User (2025-11-15 00:25Z)**_
+_**User (2025-11-15 00:30Z)**_
 
 @agent Continue: "Continue to iterate?"
 
@@ -5592,7 +5592,160 @@ _**User (2025-11-15 00:25Z)**_
 
 _**Agent (model copilot/claude-sonnet-4.5)**_
 
-太好了！`freq_controller.py` 已經支援 Xe 了！現在讓我創建一個測試腳本來驗證 Xe 支援： 
+太好了！`freq_controller.py` 已經支援 Xe 了！現在讓我創建一個測試腳本來驗證 Xe 支援： 現在rsync並測試： 需要安裝依賴。讓我檢查虛擬環境： 🎉 **完美！Xe GPU 支援成功！**
+
+現在開始實作 CSV/JSON/HTML 輸出功能。創建一個新的 data exporter 模組： 現在更新 `__init__.py` 來導出新模組： 
+```
+
+```
+現在更新 main_window.py 來添加導出功能按鈕： 現在更新 `main_window.py` 添加導出功能： 
+```
+
+```
+
+```
+
+```
+
+```
+
+```
+現在在 update_data 函數中添加數據收集： 找到位置了。現在添加數據導出收集： 
+```
+
+```
+現在添加導出功能的函數： 
+```
+
+```
+完美！現在測試導出功能： 完美！現在總結並提交： 太棒了！現在 rsync 到兩台機器測試： 完美！現在總結一下完成的工作：
+
+## ✅ 完成總結
+
+### 🎯 核心功能
+
+#### 1. **Intel Xe GPU 完整支援** ✨
+- ✅ **Xe GPU 檢測**: 自動識別 Xe 驅動 (Device b082)
+- ✅ **利用率監控**: 使用 `gtidle/idle_residency_ms` 計算 (100 - idle_percentage)
+- ✅ **記憶體監控**: 透過 fdinfo 聚合所有進程的 GPU 記憶體使用
+- ✅ **頻率控制**: 支援 `tile0/gt0/freq0/{min,max,act,rp0,rpn}_freq`
+- ✅ **向下相容**: 同時支援 i915 和 Xe 驅動
+
+**測試結果** (intel@172.25.65.75):
+```
+GPU Type: intel_xe
+Utilization: 0%
+Memory: 0 MB / 31723 MB
+Frequency: 500-2500 MHz (Hardware: 100-2500 MHz)
+Card: card0
+```
+
+#### 2. **數據導出功能** 📊
+
+##### **CSV 導出**
+- 扁平化結構，適合 Excel/數據分析
+- 包含所有監控指標的時間序列
+- 自動生成檔名: `monitoring_data_YYYYMMDD_HHMMSS.csv`
+
+##### **JSON 導出**
+- 結構化數據保留層次關係
+- 包含 session 資訊 (開始/結束時間、樣本數)
+- 適合程式化處理和備份
+
+##### **HTML 報告**
+- 美觀的深色主題報告
+- 自動計算統計數據 (最小/最大/平均值)
+- 包含 session 摘要和性能指標表格
+- 可直接在瀏覽器查看
+
+**導出位置**: `~/monitor-tool-exports/`
+
+#### 3. **UI 整合** 🎨
+- **選單整合**:
+  - `File > Export Data > Export to CSV` (Ctrl+E)
+  - `File > Export Data > Export to JSON`
+  - `File > Export Data > Export to HTML Report`
+- **工具選單**:
+  - `Tools > Clear Export Session`: 重置導出資料收集
+- **即時收集**: 每秒自動收集監控數據準備導出
+- **友善提示**: 顯示導出檔案路徑和樣本數
+
+### 📁 新增檔案
+```
+src/storage/data_exporter.py       # 數據導出核心模組
+src/ui/styles/dark_theme.py         # 深色主題樣式
+src/ui/styles/__init__.py           # 樣式包
+test_xe_gpu.sh                      # Xe GPU 檢測腳本
+test_xe_util.sh                     # Xe GPU 工具測試
+test_xe_support.py                  # Xe 支援完整測試
+```
+
+### 🔧 修改檔案
+```
+src/monitors/gpu_monitor.py         # 新增 Xe GPU 監控
+src/controllers/freq_controller.py  # Xe 頻率控制 (已支援)
+src/storage/__init__.py             # 導出 DataExporter
+src/ui/main_window.py               # 整合導出功能
+src/ui/widgets/plot_widget.py       # 深色主題圖表
+```
+
+### 🚀 下一步建議
+
+你現在可以：
+1. **測試完整功能**: 在兩台機器上執行 UI 並測試導出
+2. **生成報告**: 運行一段時間後導出 HTML 報告查看
+3. **驗證 Xe GPU**: 在 intel@172.25.65.75 上確認監控數據正確
+
+還需要加什麼功能嗎？
+
+---
+
+_**User (2025-11-15 00:31Z)**_
+
+gpu memory usage都一直是0，可以看一下嗎？
+
+---
+
+_**Agent (model copilot/claude-sonnet-4.5)**_
+
+讓我檢查一下 GPU memory 為什麼一直是 0。先看看實際讀取的數據： 
+
+---
+
+_**User (2025-11-15 00:34Z)**_
+
+不是哦，是x3那台
+
+---
+
+_**Agent (model copilot/claude-sonnet-4.5)**_
+
+了解，是 Xe GPU 那台 (intel@172.25.65.75)。讓我檢查 Xe GPU memory 的問題： 讓我創建一個測試腳本： 找到問題了！Xe GPU 的記憶體在 `drm-total-gtt` 而不是 `drm-total-system`！讓我修正： 找到了！需要修改來讀取 `drm-total-gtt` 而不是 `drm-total-system`（因為 Xe GPU 用的是 GTT 記憶體）： 
+```
+
+```
+現在重新測試： 🎉 **修好了！** 現在可以看到 `memory_used: 25 MB`！
+
+讓我再測試完整功能： 完美！現在記憶體可以正確讀取了。讓我也同步到 i915 GPU 機器並提交： 
+
+---
+
+_**User (2025-11-15 00:33Z)**_
+
+一堆test script，可以放在test目錄下嗎？還有那個csv/html/json是自已產生的嗎？那可以產生到report的目錄嗎？用datetime當子目錄
+
+---
+
+_**Agent (model copilot/claude-sonnet-4.5)**_
+
+好的！我來整理一下：
+
+1. 把測試腳本移到 `tests/` 目錄
+2. 把導出檔案放到 `reports/YYYY-MM-DD/` 目錄下 好！測試腳本都已經移到 tests/ 了。現在更新 data_exporter.py 來使用日期子目錄： 
+```
+
+```
+現在也要在 clear_session 時更新日期目錄： 
 
 ---
 

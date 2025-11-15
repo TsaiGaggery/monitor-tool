@@ -336,11 +336,19 @@ class GPUMonitor:
                                 content = f.read()
                                 if 'drm-driver:' in content and 'xe' in content:
                                     # Parse memory fields
+                                    # Xe GPU uses GTT (Graphics Translation Table) memory
                                     for line in content.split('\n'):
-                                        if line.startswith('drm-total-system:'):
+                                        if line.startswith('drm-total-gtt:'):
+                                            # Format: "drm-total-gtt:     25984 KiB"
+                                            parts = line.split(':')[1].strip().split()
+                                            if len(parts) >= 2 and parts[1] == 'KiB':
+                                                mem_kb = int(parts[0])
+                                                total_used += mem_kb * 1024
+                                        elif line.startswith('drm-total-system:'):
+                                            # Fallback for system memory
                                             mem_kb = int(line.split(':')[1].strip())
                                             total_used += mem_kb * 1024
-                        except (PermissionError, FileNotFoundError):
+                        except (PermissionError, FileNotFoundError, ValueError):
                             continue
                 except (PermissionError, FileNotFoundError):
                     continue

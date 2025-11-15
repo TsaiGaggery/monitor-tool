@@ -36,6 +36,10 @@ debian/.debhelper/
 *.sqlite
 *.sqlite3
 
+# Reports and exports
+reports/
+monitor-tool-exports/
+
 # Logs
 *.log
 
