@@ -1,6 +1,6 @@
 # 系統監控工具
 
-Linux 系統全面的即時監控儀表板，支援 CPU、GPU、NPU 和記憶體監控以及頻率控制。
+Linux 系統全面的即時監控儀表板，支援 CPU、GPU、NPU、記憶體、網路和磁碟 I/O 監控以及頻率控制。
 
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)
@@ -35,6 +35,20 @@ Linux 系統全面的即時監控儀表板，支援 CPU、GPU、NPU 和記憶體
   - RAM 使用量詳細分解
   - Swap 使用量追蹤
   - 歷史趨勢
+
+- **網路監控** 🌐
+  - 即時上傳/下載速度
+  - 網路介面統計
+  - 活躍連線數（TCP/UDP）
+  - 封包統計（發送/接收、錯誤、丟包）
+  - 雙軸速度圖表
+
+- **磁碟 I/O 監控** 💿
+  - 即時讀取/寫入速度
+  - IOPS（每秒讀寫次數）
+  - 分割區使用狀況
+  - 多磁碟支援
+  - 雙軸 I/O 圖表
 
 ### ⚙️ 頻率控制
 - CPU 調速器控制（Performance、Powersave、Ondemand）

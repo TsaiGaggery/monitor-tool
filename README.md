@@ -1,6 +1,6 @@
 # System Monitor Tool
 
-A unified Linux system monitoring dashboard for real-time CPU, GPU, NPU, and memory monitoring with frequency control.
+A unified Linux system monitoring dashboard for real-time CPU, GPU, NPU, memory, network, and disk I/O monitoring with frequency control.
 
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)
@@ -15,6 +15,8 @@ A unified Linux system monitoring dashboard for real-time CPU, GPU, NPU, and mem
 - 🎮 GPU monitoring (Intel/NVIDIA/AMD)
 - 🧠 NPU monitoring (Intel Meteor Lake+)
 - 💾 Memory & swap usage
+- 🌐 Network traffic & speed monitoring
+- 💿 Disk I/O & partition usage
 - ⚙️ CPU frequency & governor control
 - 📈 Real-time charts with historical data logging
 
@@ -47,34 +49,46 @@ That's it! The dashboard will open showing all monitoring data in one window.
 The unified dashboard displays:
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  Overview Tab                                       │
-│  ├─ CPU Usage Chart                                 │
-│  ├─ Memory Usage Chart                              │
-│  └─ System Info Summary                             │
-│                                                      │
-│  CPU Tab                                            │
-│  ├─ Per-core usage                                  │
-│  ├─ Frequency & Temperature                         │
-│  └─ Real-time frequency chart                       │
-│                                                      │
-│  Memory Tab                                         │
-│  ├─ RAM & Swap usage                                │
-│  └─ Usage history chart                             │
-│                                                      │
-│  GPU Tab (if detected)                              │
-│  ├─ GPU usage, temp, memory                         │
-│  └─ Clock speed chart                               │
-│                                                      │
-│  NPU Tab (if detected)                              │
-│  ├─ NPU utilization                                 │
-│  └─ Frequency monitoring                            │
-│                                                      │
-│  Control Panel (sidebar)                            │
-│  ├─ CPU Governor selector                           │
-│  ├─ Frequency range control                         │
-│  └─ Performance presets                             │
-└─────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│  Overview Tab                                           │
+│  ├─ Info Cards (CPU, Memory, GPU, Network, Disk)       │
+│  ├─ CPU & Memory Usage Charts                          │
+│  ├─ Network Speed Chart (Upload/Download)              │
+│  ├─ Disk I/O Chart (Read/Write)                        │
+│  └─ GPU & NPU Charts (if available)                    │
+│                                                         │
+│  CPU Tab                                                │
+│  ├─ Per-core usage                                      │
+│  ├─ Frequency & Temperature                             │
+│  └─ Real-time frequency chart                           │
+│                                                         │
+│  Memory Tab                                             │
+│  ├─ RAM & Swap usage                                    │
+│  └─ Usage history chart                                 │
+│                                                         │
+│  GPU Tab (if detected)                                  │
+│  ├─ GPU usage, temp, memory                             │
+│  └─ Clock speed chart                                   │
+│                                                         │
+│  NPU Tab (if detected)                                  │
+│  ├─ NPU utilization                                     │
+│  └─ Frequency monitoring                                │
+│                                                         │
+│  Network Tab                                            │
+│  ├─ Upload/Download speeds                              │
+│  ├─ Active connections count                            │
+│  └─ Real-time speed chart                               │
+│                                                         │
+│  Disk Tab                                               │
+│  ├─ Read/Write speeds & IOPS                            │
+│  ├─ Partition usage                                     │
+│  └─ Real-time I/O chart                                 │
+│                                                         │
+│  Control Panel (sidebar)                                │
+│  ├─ CPU Governor selector                               │
+│  ├─ Frequency range control                             │
+│  └─ Performance presets                                 │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ## Configuration

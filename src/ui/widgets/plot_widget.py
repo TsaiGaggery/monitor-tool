@@ -176,16 +176,27 @@ class MonitorPlotWidget(QWidget):
 
 
 class MultiLinePlotWidget(QWidget):
-    """Widget for displaying multiple lines on the same plot."""
+    """Widget for displaying two lines on dual axes (e.g., upload/download, read/write)."""
     
-    def __init__(self, title: str, line_names: list, max_points: int = 60, parent=None):
+    def __init__(self, title: str, y_label: str = "Primary", y_label2: str = "Secondary", 
+                 max_points: int = 60, parent=None):
+        """Initialize multi-line plot widget with dual axes.
+        
+        Args:
+            title: Plot title
+            y_label: Left Y-axis label
+            y_label2: Right Y-axis label
+            max_points: Maximum number of data points to display
+            parent: Parent widget
+        """
         super().__init__(parent)
         self.title = title
-        self.line_names = line_names
+        self.y_label = y_label
+        self.y_label2 = y_label2
         self.max_points = max_points
-        self.data_buffers = {name: deque(maxlen=max_points) for name in line_names}
+        self.data_buffer1 = deque(maxlen=max_points)
+        self.data_buffer2 = deque(maxlen=max_points)
         self.time_buffer = deque(maxlen=max_points)
-        self.curves = {}
         
         self.init_ui()
     
@@ -194,61 +205,101 @@ class MultiLinePlotWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         
+        # Determine colors based on title
+        title_lower = self.title.lower()
+        color1 = CHART_COLORS['cpu']  # Default first line color
+        color2 = CHART_COLORS['gpu']  # Default second line color
+        
+        if 'network' in title_lower:
+            color1 = '#4ecdc4'  # Cyan for upload
+            color2 = '#ff6b6b'  # Red for download (more contrast)
+        elif 'disk' in title_lower or 'io' in title_lower:
+            color1 = '#ff6b6b'  # Red for read
+            color2 = '#ffd93d'  # Yellow for write
+        
+        # Create custom title with color legend
+        title_label = QLabel()
+        title_html = f'''
+        <div style="text-align: center; padding: 5px; font-size: 12pt; color: #e0e0e0;">
+            {self.title}
+            <span style="margin-left: 20px;">
+                <span style="color: {color1}; font-weight: bold;">━━</span> {self.y_label}
+                <span style="margin-left: 15px; color: {color2}; font-weight: bold;">━━</span> {self.y_label2}
+            </span>
+        </div>
+        '''
+        title_label.setText(title_html)
+        title_label.setStyleSheet("background-color: #1e1e1e;")
+        layout.addWidget(title_label)
+        
         # Create plot widget with dark theme
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground('#1e1e1e')
-        self.plot_widget.setTitle(self.title, color='#e0e0e0', size='12pt')
-        self.plot_widget.setLabel('left', 'Usage (%)', color='#e0e0e0')
         self.plot_widget.setLabel('bottom', 'Time (s)', color='#e0e0e0')
+        self.plot_widget.setLabel('left', self.y_label, color='#e0e0e0')
         self.plot_widget.showGrid(x=True, y=True, alpha=0.2)
-        self.plot_widget.getAxis('left').setPen('#3a3a3a')
         self.plot_widget.getAxis('bottom').setPen('#3a3a3a')
-        self.plot_widget.getAxis('left').setTextPen('#e0e0e0')
         self.plot_widget.getAxis('bottom').setTextPen('#e0e0e0')
-        self.plot_widget.setYRange(0, 100)
-        self.plot_widget.addLegend()
+        self.plot_widget.getAxis('left').setPen('#3a3a3a')
+        self.plot_widget.getAxis('left').setTextPen('#e0e0e0')
         
-        # Create curves for each line with theme colors
-        plot_colors = [
-            CHART_COLORS['cpu'],
-            CHART_COLORS['gpu'], 
-            CHART_COLORS['npu'],
-            CHART_COLORS['memory'],
-            CHART_COLORS['temperature'],
-            CHART_COLORS['power']
-        ]
-        for i, name in enumerate(self.line_names):
-            pen = pg.mkPen(color=plot_colors[i % len(plot_colors)], width=2)
-            self.curves[name] = self.plot_widget.plot(pen=pen, name=name)
+        # Create second Y-axis
+        self.viewbox2 = pg.ViewBox()
+        self.plot_widget.scene().addItem(self.viewbox2)
+        self.plot_widget.getAxis('right').linkToView(self.viewbox2)
+        self.viewbox2.setXLink(self.plot_widget)
+        self.plot_widget.getAxis('right').setLabel(self.y_label2, color='#e0e0e0')
+        self.plot_widget.showAxis('right')
+        self.plot_widget.getAxis('right').setPen('#3a3a3a')
+        self.plot_widget.getAxis('right').setTextPen('#e0e0e0')
+        
+        # Update views when plot is resized
+        def update_views():
+            self.viewbox2.setGeometry(self.plot_widget.getViewBox().sceneBoundingRect())
+            self.viewbox2.linkedViewChanged(self.plot_widget.getViewBox(), self.viewbox2.XAxis)
+        
+        update_views()
+        self.plot_widget.getViewBox().sigResized.connect(update_views)
+        
+        # Create two curves
+        pen1 = pg.mkPen(color=color1, width=2.5)
+        pen2 = pg.mkPen(color=color2, width=2.5)
+        self.curve1 = self.plot_widget.plot(pen=pen1, name=self.y_label)
+        self.curve2 = pg.PlotCurveItem(pen=pen2, name=self.y_label2)
+        self.viewbox2.addItem(self.curve2)
         
         layout.addWidget(self.plot_widget)
     
-    def update_data(self, values: dict, timestamp: float = None):
-        """Update plot with new data points."""
+    def update_data(self, value1: float, value2: float, timestamp: float = None):
+        """Update plot with new data points.
+        
+        Args:
+            value1: First value (left axis)
+            value2: Second value (right axis)
+            timestamp: Time stamp for x-axis
+        """
         if timestamp is None:
             if self.time_buffer:
                 timestamp = self.time_buffer[-1] + 1
             else:
                 timestamp = 0
         
+        self.data_buffer1.append(value1)
+        self.data_buffer2.append(value2)
         self.time_buffer.append(timestamp)
         
-        for name, value in values.items():
-            if name in self.data_buffers:
-                self.data_buffers[name].append(value)
-        
-        # Update all curves
-        if len(self.time_buffer) > 0:
+        # Update plot
+        if len(self.data_buffer1) > 0:
             x = np.array(self.time_buffer)
-            for name, curve in self.curves.items():
-                if len(self.data_buffers[name]) > 0:
-                    y = np.array(self.data_buffers[name])
-                    curve.setData(x, y)
+            y1 = np.array(self.data_buffer1)
+            y2 = np.array(self.data_buffer2)
+            self.curve1.setData(x, y1)
+            self.curve2.setData(x, y2)
     
     def clear(self):
         """Clear all data."""
-        for buffer in self.data_buffers.values():
-            buffer.clear()
+        self.data_buffer1.clear()
+        self.data_buffer2.clear()
         self.time_buffer.clear()
-        for curve in self.curves.values():
-            curve.setData([], [])
+        self.curve1.setData([], [])
+        self.curve2.setData([], [])

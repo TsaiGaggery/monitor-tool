@@ -8,11 +8,12 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtGui import QFont
 
-from monitors import CPUMonitor, GPUMonitor, MemoryMonitor, NPUMonitor
+from monitors import CPUMonitor, GPUMonitor, MemoryMonitor, NPUMonitor, NetworkMonitor, DiskMonitor
 from controllers import FrequencyController
 from storage import DataLogger, DataExporter
 from ui.widgets.plot_widget import MonitorPlotWidget, MultiLinePlotWidget
 from ui.widgets.control_panel import ControlPanel
+from ui.widgets.info_card import InfoCard
 from ui.styles import apply_dark_theme, CHART_COLORS
 
 import time
@@ -34,6 +35,8 @@ class MainWindow(QMainWindow):
         self.gpu_monitor = GPUMonitor()
         self.memory_monitor = MemoryMonitor()
         self.npu_monitor = NPUMonitor()
+        self.network_monitor = NetworkMonitor()
+        self.disk_monitor = DiskMonitor()
         self.freq_controller = FrequencyController()
         self.data_logger = DataLogger()
         self.data_exporter = DataExporter()
@@ -90,6 +93,14 @@ class MainWindow(QMainWindow):
             npu_tab = self.create_npu_tab()
             self.tabs.addTab(npu_tab, "NPU")
         
+        # Network tab
+        network_tab = self.create_network_tab()
+        self.tabs.addTab(network_tab, "Network")
+        
+        # Disk tab
+        disk_tab = self.create_disk_tab()
+        self.tabs.addTab(disk_tab, "Disk")
+        
         left_layout.addWidget(self.tabs)
         
         # Right side - Control panel
@@ -105,34 +116,78 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Ready")
     
     def create_overview_tab(self) -> QWidget:
-        """Create overview tab."""
+        """Create overview tab with all system metrics."""
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
-        # Info labels
-        info_group = QGroupBox("System Information")
-        info_layout = QGridLayout()
+        # Info cards section
+        cards_layout = QHBoxLayout()
+        cards_layout.setSpacing(10)
         
-        self.cpu_info_label = QLabel("CPU: -")
-        self.memory_info_label = QLabel("Memory: -")
-        self.gpu_info_label = QLabel("GPU: -")
+        # CPU Card
+        self.cpu_card = InfoCard("CPU", "📊")
+        self.cpu_card.set_color("#4CAF50")
+        cards_layout.addWidget(self.cpu_card)
         
-        info_layout.addWidget(QLabel("CPU Usage:"), 0, 0)
-        info_layout.addWidget(self.cpu_info_label, 0, 1)
-        info_layout.addWidget(QLabel("Memory:"), 1, 0)
-        info_layout.addWidget(self.memory_info_label, 1, 1)
-        info_layout.addWidget(QLabel("GPU:"), 2, 0)
-        info_layout.addWidget(self.gpu_info_label, 2, 1)
+        # Memory Card
+        self.memory_card = InfoCard("Memory", "💾")
+        self.memory_card.set_color("#2196F3")
+        cards_layout.addWidget(self.memory_card)
         
-        info_group.setLayout(info_layout)
-        layout.addWidget(info_group)
+        # GPU Card (if available)
+        if self.gpu_monitor.gpu_type:
+            self.gpu_card = InfoCard("GPU", "🎮")
+            self.gpu_card.set_color("#FF9800")
+            cards_layout.addWidget(self.gpu_card)
         
-        # Overview plots
+        # Network Card
+        self.network_card = InfoCard("Network", "🌐")
+        self.network_card.set_color("#9C27B0")
+        cards_layout.addWidget(self.network_card)
+        
+        # Disk Card
+        self.disk_card = InfoCard("Disk", "💿")
+        self.disk_card.set_color("#F44336")
+        cards_layout.addWidget(self.disk_card)
+        
+        layout.addLayout(cards_layout)
+        
+        # Charts section - 2x3 grid
+        charts_group = QGroupBox("Real-time Monitoring")
+        charts_layout = QGridLayout()
+        charts_layout.setSpacing(10)
+        
+        # Row 1: CPU and Memory
         self.overview_cpu_plot = MonitorPlotWidget("CPU Usage (%)")
         self.overview_memory_plot = MonitorPlotWidget("Memory Usage (%)")
+        charts_layout.addWidget(self.overview_cpu_plot, 0, 0)
+        charts_layout.addWidget(self.overview_memory_plot, 0, 1)
         
-        layout.addWidget(self.overview_cpu_plot)
-        layout.addWidget(self.overview_memory_plot)
+        # Row 2: Network and Disk
+        self.overview_network_plot = MultiLinePlotWidget("Network Speed", 
+                                                         y_label="Upload (MB/s)",
+                                                         y_label2="Download (MB/s)")
+        self.overview_disk_plot = MultiLinePlotWidget("Disk I/O", 
+                                                      y_label="Read (MB/s)",
+                                                      y_label2="Write (MB/s)")
+        charts_layout.addWidget(self.overview_network_plot, 1, 0)
+        charts_layout.addWidget(self.overview_disk_plot, 1, 1)
+        
+        # Row 3: GPU and NPU (if available)
+        if self.gpu_monitor.gpu_type:
+            self.overview_gpu_plot = MultiLinePlotWidget("GPU Usage & Frequency",
+                                                         y_label="Usage (%)",
+                                                         y_label2="Freq (MHz)")
+            charts_layout.addWidget(self.overview_gpu_plot, 2, 0)
+        
+        if self.npu_monitor.available:
+            self.overview_npu_plot = MultiLinePlotWidget("NPU Usage & Frequency",
+                                                         y_label="Usage (%)",
+                                                         y_label2="Freq (MHz)")
+            charts_layout.addWidget(self.overview_npu_plot, 2, 1)
+        
+        charts_group.setLayout(charts_layout)
+        layout.addWidget(charts_group)
         
         return widget
     
@@ -265,6 +320,74 @@ class MainWindow(QMainWindow):
         
         return widget
     
+    def create_network_tab(self) -> QWidget:
+        """Create network monitoring tab."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        # Network info
+        info_group = QGroupBox("Network Information")
+        info_layout = QGridLayout()
+        
+        self.network_interface_label = QLabel("Interface: -")
+        self.network_upload_label = QLabel("Upload: -")
+        self.network_download_label = QLabel("Download: -")
+        self.network_connections_label = QLabel("Connections: -")
+        
+        info_layout.addWidget(QLabel("Interface:"), 0, 0)
+        info_layout.addWidget(self.network_interface_label, 0, 1)
+        info_layout.addWidget(QLabel("Upload Speed:"), 1, 0)
+        info_layout.addWidget(self.network_upload_label, 1, 1)
+        info_layout.addWidget(QLabel("Download Speed:"), 2, 0)
+        info_layout.addWidget(self.network_download_label, 2, 1)
+        info_layout.addWidget(QLabel("Active Connections:"), 3, 0)
+        info_layout.addWidget(self.network_connections_label, 3, 1)
+        
+        info_group.setLayout(info_layout)
+        layout.addWidget(info_group)
+        
+        # Network speed plot (dual axis: upload and download)
+        self.network_speed_plot = MultiLinePlotWidget("Network Speed", 
+                                                      y_label="Upload (MB/s)",
+                                                      y_label2="Download (MB/s)")
+        layout.addWidget(self.network_speed_plot)
+        
+        return widget
+    
+    def create_disk_tab(self) -> QWidget:
+        """Create disk I/O monitoring tab."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        # Disk info
+        info_group = QGroupBox("Disk I/O Information")
+        info_layout = QGridLayout()
+        
+        self.disk_device_label = QLabel("Device: -")
+        self.disk_read_label = QLabel("Read Speed: -")
+        self.disk_write_label = QLabel("Write Speed: -")
+        self.disk_usage_label = QLabel("Root Usage: -")
+        
+        info_layout.addWidget(QLabel("Device:"), 0, 0)
+        info_layout.addWidget(self.disk_device_label, 0, 1)
+        info_layout.addWidget(QLabel("Read Speed:"), 1, 0)
+        info_layout.addWidget(self.disk_read_label, 1, 1)
+        info_layout.addWidget(QLabel("Write Speed:"), 2, 0)
+        info_layout.addWidget(self.disk_write_label, 2, 1)
+        info_layout.addWidget(QLabel("Root Usage:"), 3, 0)
+        info_layout.addWidget(self.disk_usage_label, 3, 1)
+        
+        info_group.setLayout(info_layout)
+        layout.addWidget(info_group)
+        
+        # Disk I/O plot (dual axis: read and write)
+        self.disk_io_plot = MultiLinePlotWidget("Disk I/O", 
+                                                y_label="Read (MB/s)",
+                                                y_label2="Write (MB/s)")
+        layout.addWidget(self.disk_io_plot)
+        
+        return widget
+    
     def init_menu(self):
         """Initialize menu bar."""
         menubar = self.menuBar()
@@ -330,8 +453,7 @@ class MainWindow(QMainWindow):
         cpu_usage = cpu_info['usage']['total']
         cpu_freq = cpu_info['frequency']['average']
         
-        # Update CPU labels
-        self.cpu_info_label.setText(f"{cpu_usage:.1f}%")
+        # Update CPU tab labels
         self.cpu_freq_label.setText(f"Frequency: {cpu_freq:.0f} MHz")
         
         # CPU temperature
@@ -352,9 +474,7 @@ class MainWindow(QMainWindow):
         mem = memory_info['memory']
         swap = memory_info['swap']
         
-        # Update memory labels
-        self.memory_info_label.setText(
-            f"{mem['used']:.1f} / {mem['total']:.1f} GB ({mem['percent']:.1f}%)")
+        # Update memory tab labels
         self.mem_total_label.setText(f"{mem['total']:.1f} GB")
         self.mem_used_label.setText(f"{mem['used']:.1f} GB ({mem['percent']:.1f}%)")
         self.mem_free_label.setText(f"{mem['free']:.1f} GB")
@@ -367,7 +487,6 @@ class MainWindow(QMainWindow):
             if gpus:
                 gpu = gpus[0]
                 gpu_util = gpu.get('gpu_util', 0)
-                self.gpu_info_label.setText(f"{gpu_util}%")
                 
                 if hasattr(self, 'gpu_name_label'):
                     self.gpu_name_label.setText(f"GPU: {gpu.get('name', 'Unknown')}")
@@ -394,8 +513,6 @@ class MainWindow(QMainWindow):
                     
                     # Update GPU plot with usage and frequency
                     self.gpu_usage_plot.update_data(gpu_util, gpu_freq, current_time)
-        else:
-            self.gpu_info_label.setText("N/A")
         
         # NPU data
         if self.npu_monitor.available:
@@ -410,12 +527,83 @@ class MainWindow(QMainWindow):
                 # Update NPU plot with usage and frequency
                 self.npu_usage_plot.update_data(util, freq, current_time)
         
+        # Network data
+        network_info = self.network_monitor.get_io_stats()
+        upload_speed_mb = network_info.get('upload_speed', 0) / (1024 * 1024)  # Convert to MB/s
+        download_speed_mb = network_info.get('download_speed', 0) / (1024 * 1024)
+        connections = self.network_monitor.get_connections_count()
+        
+        # Update network labels
+        self.network_interface_label.setText("Total")
+        self.network_upload_label.setText(f"{upload_speed_mb:.2f} MB/s")
+        self.network_download_label.setText(f"{download_speed_mb:.2f} MB/s")
+        self.network_connections_label.setText(f"{connections.get('total', 0)} ({connections.get('tcp_established', 0)} TCP)")
+        
+        # Update network card
+        self.network_card.update_values(
+            f"↑{upload_speed_mb:.1f} MB/s",
+            f"↓{download_speed_mb:.1f} MB/s"
+        )
+        
+        # Disk data
+        disk_info = self.disk_monitor.get_io_stats()
+        read_speed_mb = disk_info.get('read_speed_mb', 0)
+        write_speed_mb = disk_info.get('write_speed_mb', 0)
+        root_usage = self.disk_monitor.get_partition_usage('/')
+        
+        # Update disk labels
+        self.disk_device_label.setText("Total")
+        self.disk_read_label.setText(f"{read_speed_mb:.2f} MB/s")
+        self.disk_write_label.setText(f"{write_speed_mb:.2f} MB/s")
+        if root_usage:
+            self.disk_usage_label.setText(f"{root_usage['used']:.1f} / {root_usage['total']:.1f} GB ({root_usage['percent']:.1f}%)")
+        
+        # Update disk card
+        self.disk_card.update_values(
+            f"R:{read_speed_mb:.1f} MB/s",
+            f"W:{write_speed_mb:.1f} MB/s"
+        )
+        
+        # Update info cards
+        self.cpu_card.update_values(f"{cpu_usage:.1f}%", f"{cpu_freq:.0f} MHz")
+        self.memory_card.update_values(f"{mem['percent']:.1f}%", f"{mem['used']:.1f} GB")
+        
+        if self.gpu_monitor.gpu_type and hasattr(self, 'gpu_card'):
+            gpu_info_card = self.gpu_monitor.get_all_info()
+            if gpu_info_card.get('available') and gpu_info_card['gpus']:
+                gpu = gpu_info_card['gpus'][0]
+                gpu_util = gpu.get('gpu_util', 0)
+                gpu_temp = gpu.get('temperature', 0)
+                if gpu_temp > 0:
+                    self.gpu_card.update_values(f"{gpu_util}%", f"{gpu_temp}°C")
+                else:
+                    self.gpu_card.update_values(f"{gpu_util}%", "N/A")
+        
         # Update plots
         self.overview_cpu_plot.update_data(cpu_usage, current_time)
         self.overview_memory_plot.update_data(mem['percent'], current_time)
+        self.overview_network_plot.update_data(upload_speed_mb, download_speed_mb, current_time)
+        self.overview_disk_plot.update_data(read_speed_mb, write_speed_mb, current_time)
+        
+        if self.gpu_monitor.gpu_type and hasattr(self, 'overview_gpu_plot'):
+            if gpu_info.get('available') and gpu_info['gpus']:
+                gpu = gpu_info['gpus'][0]
+                gpu_util = gpu.get('gpu_util', 0)
+                gpu_freq = gpu.get('gpu_clock', 0)
+                self.overview_gpu_plot.update_data(gpu_util, gpu_freq, current_time)
+        
+        if self.npu_monitor.available and hasattr(self, 'overview_npu_plot'):
+            npu_info_plot = self.npu_monitor.get_all_info()
+            if npu_info_plot.get('available'):
+                util = npu_info_plot.get('utilization', 0)
+                freq = npu_info_plot.get('frequency', 0)
+                self.overview_npu_plot.update_data(util, freq, current_time)
+        
         self.cpu_usage_plot.update_data(cpu_usage, current_time)
         self.cpu_freq_plot.update_data(cpu_freq, current_time)
         self.memory_usage_plot.update_data(mem['percent'], current_time)
+        self.network_speed_plot.update_data(upload_speed_mb, download_speed_mb, current_time)
+        self.disk_io_plot.update_data(read_speed_mb, write_speed_mb, current_time)
         
         # Log data to database
         self.data_logger.log_data(cpu_info, memory_info, gpu_info, 
@@ -427,16 +615,37 @@ class MainWindow(QMainWindow):
             'time_seconds': current_time,
             'cpu': cpu_info,
             'memory': memory_info,
-            'gpu': gpu_info
+            'gpu': gpu_info,
+            'network': network_info,
+            'disk': disk_info
         }
         if self.npu_monitor.available:
             export_data['npu'] = npu_info
         self.data_exporter.add_sample(export_data)
         
         # Update status bar
-        self.status_bar.showMessage(
+        status_msg = (
             f"Last update: {time.strftime('%H:%M:%S')} | "
-            f"CPU: {cpu_usage:.1f}% | Memory: {mem['percent']:.1f}%")
+            f"CPU: {cpu_usage:.1f}% | "
+            f"Mem: {mem['percent']:.1f}% | "
+            f"Net: ↑{upload_speed_mb:.1f}/↓{download_speed_mb:.1f} MB/s | "
+            f"Disk: R{read_speed_mb:.1f}/W{write_speed_mb:.1f} MB/s"
+        )
+        
+        # Add GPU info if available
+        if self.gpu_monitor.gpu_type and gpu_info.get('available') and gpu_info['gpus']:
+            gpu = gpu_info['gpus'][0]
+            gpu_util = gpu.get('gpu_util', 0)
+            status_msg += f" | GPU: {gpu_util}%"
+        
+        # Add NPU info if available
+        if self.npu_monitor.available:
+            npu_info_status = self.npu_monitor.get_all_info()
+            if npu_info_status.get('available'):
+                npu_util = npu_info_status.get('utilization', 0)
+                status_msg += f" | NPU: {npu_util:.1f}%"
+        
+        self.status_bar.showMessage(status_msg)
     
     def cleanup_data(self):
         """Cleanup old monitoring data."""

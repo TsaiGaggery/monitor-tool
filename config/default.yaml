@@ -29,6 +29,15 @@ monitoring:
   npu:
     enabled: true
     platform: auto  # auto, intel, rockchip, qualcomm, mediatek, generic
+  
+  network:
+    enabled: true
+    default_interface: auto  # auto or specific interface name (e.g., eth0, wlan0)
+  
+  disk:
+    enabled: true
+    exclude_virtual: true  # Exclude loop, ram, dm-, sr, zram devices
+    default_disk: auto  # auto or specific disk name (e.g., sda, nvme0n1)
 
 # Frequency control
 frequency_control:

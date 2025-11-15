@@ -1,0 +1,16 @@
+#!/bin/bash
+# CLI launcher for System Monitor Tool (no GUI required)
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="$SCRIPT_DIR/venv"
+PYTHON_SCRIPT="$SCRIPT_DIR/src/cli_monitor.py"
+
+# Check if virtual environment exists
+if [ -d "$VENV_DIR" ]; then
+    # Use virtual environment
+    source "$VENV_DIR/bin/activate"
+    python "$PYTHON_SCRIPT" "$@"
+else
+    # Use system Python
+    python3 "$PYTHON_SCRIPT" "$@"
+fi

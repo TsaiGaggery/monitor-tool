@@ -108,6 +108,13 @@ echo ""
 echo -e "${GREEN}Step 5: Installing Python dependencies...${NC}"
 source "$VENV_DIR/bin/activate"
 
+# Temporarily disable SOCKS proxy to avoid installation issues
+# Store original values
+ORIG_ALL_PROXY="$ALL_PROXY"
+ORIG_all_proxy="$all_proxy"
+unset ALL_PROXY
+unset all_proxy
+
 # Upgrade pip
 pip install --upgrade pip
 
@@ -118,6 +125,11 @@ else
     echo -e "${RED}Error: requirements.txt not found${NC}"
     exit 1
 fi
+
+# Restore proxy settings
+export ALL_PROXY="$ORIG_ALL_PROXY"
+export all_proxy="$ORIG_all_proxy"
+
 echo ""
 
 # Install optional GPU support
