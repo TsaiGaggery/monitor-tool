@@ -132,47 +132,61 @@ class FrequencyController:
     def get_gpu_freq_range(self) -> dict:
         """Get GPU frequency range information."""
         try:
-            # Try Intel Xe driver first (newer GPUs)
-            xe_base = '/sys/class/drm/card0/device/tile0/gt0/freq0'
-            if os.path.exists(xe_base):
-                with open(f'{xe_base}/min_freq', 'r') as f:
-                    min_freq = int(f.read().strip())
-                with open(f'{xe_base}/max_freq', 'r') as f:
-                    max_freq = int(f.read().strip())
-                with open(f'{xe_base}/rpn_freq', 'r') as f:
-                    hw_min = int(f.read().strip())
-                with open(f'{xe_base}/rp0_freq', 'r') as f:
-                    hw_max = int(f.read().strip())
-                with open(f'{xe_base}/act_freq', 'r') as f:
-                    act_freq = int(f.read().strip())
+            # Try to find Intel GPU on different card numbers
+            for card_num in range(5):  # Check card0-4
+                # Try Intel Xe driver first (newer GPUs)
+                xe_base = f'/sys/class/drm/card{card_num}/device/tile0/gt0/freq0'
+                if os.path.exists(xe_base):
+                    with open(f'{xe_base}/min_freq', 'r') as f:
+                        min_freq = int(f.read().strip())
+                    with open(f'{xe_base}/max_freq', 'r') as f:
+                        max_freq = int(f.read().strip())
+                    with open(f'{xe_base}/rpn_freq', 'r') as f:
+                        hw_min = int(f.read().strip())
+                    with open(f'{xe_base}/rp0_freq', 'r') as f:
+                        hw_max = int(f.read().strip())
+                    with open(f'{xe_base}/act_freq', 'r') as f:
+                        act_freq = int(f.read().strip())
+                    
+                    return {
+                        'type': 'intel_xe',
+                        'scaling_min': min_freq,
+                        'scaling_max': max_freq,
+                        'hardware_min': hw_min,
+                        'hardware_max': hw_max,
+                        'current': act_freq if act_freq > 0 else max_freq,
+                        'card': f'card{card_num}'
+                    }
                 
-                return {
-                    'type': 'intel_xe',
-                    'scaling_min': min_freq,
-                    'scaling_max': max_freq,
-                    'hardware_min': hw_min,
-                    'hardware_max': hw_max,
-                    'current': act_freq if act_freq > 0 else max_freq
-                }
-            
-            # Try Intel i915 driver (older GPUs)
-            i915_base = '/sys/class/drm/card0'
-            if os.path.exists(f'{i915_base}/gt_min_freq_mhz'):
-                with open(f'{i915_base}/gt_min_freq_mhz', 'r') as f:
-                    min_freq = int(f.read().strip())
-                with open(f'{i915_base}/gt_max_freq_mhz', 'r') as f:
-                    max_freq = int(f.read().strip())
-                with open(f'{i915_base}/gt_cur_freq_mhz', 'r') as f:
-                    cur_freq = int(f.read().strip())
-                
-                return {
-                    'type': 'intel_i915',
-                    'scaling_min': min_freq,
-                    'scaling_max': max_freq,
-                    'hardware_min': min_freq,
-                    'hardware_max': max_freq,
-                    'current': cur_freq
-                }
+                # Try Intel i915 driver (older GPUs)
+                i915_base = f'/sys/class/drm/card{card_num}'
+                if os.path.exists(f'{i915_base}/gt_min_freq_mhz'):
+                    with open(f'{i915_base}/gt_min_freq_mhz', 'r') as f:
+                        min_freq = int(f.read().strip())
+                    with open(f'{i915_base}/gt_max_freq_mhz', 'r') as f:
+                        max_freq = int(f.read().strip())
+                    with open(f'{i915_base}/gt_cur_freq_mhz', 'r') as f:
+                        cur_freq = int(f.read().strip())
+                    
+                    # Try to get hardware limits
+                    hw_min = min_freq
+                    hw_max = max_freq
+                    if os.path.exists(f'{i915_base}/gt_RP1_freq_mhz'):
+                        with open(f'{i915_base}/gt_RP1_freq_mhz', 'r') as f:
+                            hw_min = int(f.read().strip())
+                    if os.path.exists(f'{i915_base}/gt_RP0_freq_mhz'):
+                        with open(f'{i915_base}/gt_RP0_freq_mhz', 'r') as f:
+                            hw_max = int(f.read().strip())
+                    
+                    return {
+                        'type': 'intel_i915',
+                        'scaling_min': min_freq,
+                        'scaling_max': max_freq,
+                        'hardware_min': hw_min,
+                        'hardware_max': hw_max,
+                        'current': cur_freq,
+                        'card': f'card{card_num}'
+                    }
             
             return {}
         except Exception as e:
@@ -182,32 +196,34 @@ class FrequencyController:
     def set_gpu_freq_range(self, min_freq: int, max_freq: int) -> bool:
         """Set GPU frequency range in MHz."""
         try:
-            # Try Intel Xe driver first
-            xe_base = '/sys/class/drm/card0/device/tile0/gt0/freq0'
-            if os.path.exists(xe_base):
-                # Check hardware limits
-                with open(f'{xe_base}/rpn_freq', 'r') as f:
-                    hw_min = int(f.read().strip())
-                with open(f'{xe_base}/rp0_freq', 'r') as f:
-                    hw_max = int(f.read().strip())
+            # Try to find Intel GPU on different card numbers
+            for card_num in range(5):  # Check card0-4
+                # Try Intel Xe driver first
+                xe_base = f'/sys/class/drm/card{card_num}/device/tile0/gt0/freq0'
+                if os.path.exists(xe_base):
+                    # Check hardware limits
+                    with open(f'{xe_base}/rpn_freq', 'r') as f:
+                        hw_min = int(f.read().strip())
+                    with open(f'{xe_base}/rp0_freq', 'r') as f:
+                        hw_max = int(f.read().strip())
+                    
+                    # Validate range
+                    if min_freq < hw_min or max_freq > hw_max:
+                        print(f"GPU frequency range must be within {hw_min}-{hw_max} MHz")
+                        return False
+                    
+                    success = True
+                    success &= self._write_sysfs(f'{xe_base}/min_freq', str(min_freq))
+                    success &= self._write_sysfs(f'{xe_base}/max_freq', str(max_freq))
+                    return success
                 
-                # Validate range
-                if min_freq < hw_min or max_freq > hw_max:
-                    print(f"GPU frequency range must be within {hw_min}-{hw_max} MHz")
-                    return False
-                
-                success = True
-                success &= self._write_sysfs(f'{xe_base}/min_freq', str(min_freq))
-                success &= self._write_sysfs(f'{xe_base}/max_freq', str(max_freq))
-                return success
-            
-            # Try Intel i915 driver
-            i915_base = '/sys/class/drm/card0'
-            if os.path.exists(f'{i915_base}/gt_min_freq_mhz'):
-                success = True
-                success &= self._write_sysfs(f'{i915_base}/gt_min_freq_mhz', str(min_freq))
-                success &= self._write_sysfs(f'{i915_base}/gt_max_freq_mhz', str(max_freq))
-                return success
+                # Try Intel i915 driver
+                i915_base = f'/sys/class/drm/card{card_num}'
+                if os.path.exists(f'{i915_base}/gt_min_freq_mhz'):
+                    success = True
+                    success &= self._write_sysfs(f'{i915_base}/gt_min_freq_mhz', str(min_freq))
+                    success &= self._write_sysfs(f'{i915_base}/gt_max_freq_mhz', str(max_freq))
+                    return success
             
             print("GPU frequency control not available")
             return False
