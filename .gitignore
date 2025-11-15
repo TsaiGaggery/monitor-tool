@@ -16,6 +16,7 @@ dist/
 *.deb
 *.tar.gz
 *.tar.xz
+.pybuild/
 
 # IDE
 .vscode/
@@ -30,6 +31,8 @@ debian/files
 debian/*.log
 debian/*.substvars
 debian/.debhelper/
+debian/debhelper-build-stamp
+debian/*.debhelper
 
 # Data
 *.db
@@ -46,3 +49,6 @@ monitor-tool-exports/
 # OS
 .DS_Store
 Thumbs.db
+
+# AI/Documentation
+.specstory/
