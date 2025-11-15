@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Real-time plot widget for monitoring data."""
 
-from PyQt5.QtWidgets import QWidget, QVBoxLayout
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel
 from PyQt5.QtCore import Qt
 import pyqtgraph as pg
 from collections import deque
@@ -12,12 +12,14 @@ from ui.styles import CHART_COLORS
 class MonitorPlotWidget(QWidget):
     """Widget for displaying real-time monitoring plots."""
     
-    def __init__(self, title: str, max_points: int = 60, y_label: str = "Usage (%)", parent=None):
+    def __init__(self, title: str, max_points: int = 60, y_label: str = "Usage (%)", dual_axis: bool = False, parent=None):
         super().__init__(parent)
         self.title = title
         self.max_points = max_points
         self.y_label = y_label
+        self.dual_axis = dual_axis
         self.data_buffer = deque(maxlen=max_points)
+        self.data_buffer2 = deque(maxlen=max_points) if dual_axis else None  # Second series for dual axis
         self.time_buffer = deque(maxlen=max_points)
         
         self.init_ui()
@@ -27,28 +29,10 @@ class MonitorPlotWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         
-        # Create plot widget with dark theme
-        self.plot_widget = pg.PlotWidget()
-        self.plot_widget.setBackground('#1e1e1e')
-        self.plot_widget.setTitle(self.title, color='#e0e0e0', size='12pt')
-        self.plot_widget.setLabel('left', self.y_label, color='#e0e0e0')
-        self.plot_widget.setLabel('bottom', 'Time (s)', color='#e0e0e0')
-        self.plot_widget.showGrid(x=True, y=True, alpha=0.2)
-        self.plot_widget.getAxis('left').setPen('#3a3a3a')
-        self.plot_widget.getAxis('bottom').setPen('#3a3a3a')
-        self.plot_widget.getAxis('left').setTextPen('#e0e0e0')
-        self.plot_widget.getAxis('bottom').setTextPen('#e0e0e0')
-        
-        # Set Y range based on label type
-        if 'MHz' in self.y_label or 'Frequency' in self.y_label:
-            self.plot_widget.enableAutoRange(axis='y')
-        else:
-            self.plot_widget.setYRange(0, 100)
-        
-        # Create plot curve with theme color
-        # Determine color based on title
-        line_color = '#4ecdc4'  # default gpu color
+        # Determine colors based on title (needed for both title and plot)
         title_lower = self.title.lower()
+        line_color = '#4ecdc4'  # default gpu color
+        
         if 'cpu' in title_lower:
             line_color = CHART_COLORS['cpu']
         elif 'gpu' in title_lower:
@@ -62,15 +46,102 @@ class MonitorPlotWidget(QWidget):
         elif 'power' in title_lower:
             line_color = CHART_COLORS['power']
         elif 'freq' in title_lower:
-            line_color = '#14ffec'  # cyan accent for frequency
+            line_color = '#14ffec'
         
-        pen = pg.mkPen(color=line_color, width=2)
-        self.curve = self.plot_widget.plot(pen=pen)
+        # Add custom title with color legend for dual-axis mode
+        if self.dual_axis:
+            freq_color = "#ffd93d"  # Yellow
+            
+            # Create HTML title with colored lines
+            title_label = QLabel()
+            title_html = f'''
+            <div style="text-align: center; padding: 5px; font-size: 12pt; color: #e0e0e0;">
+                {self.title}
+                <span style="margin-left: 20px;">
+                    <span style="color: {line_color}; font-weight: bold;">━━</span> Usage
+                    <span style="margin-left: 15px; color: {freq_color}; font-weight: bold;">━━</span> Frequency
+                </span>
+            </div>
+            '''
+            title_label.setText(title_html)
+            title_label.setStyleSheet("background-color: #1e1e1e;")
+            layout.addWidget(title_label)
+        
+        # Create plot widget with dark theme
+        self.plot_widget = pg.PlotWidget()
+        self.plot_widget.setBackground('#1e1e1e')
+        
+        # Only set title if not dual-axis (dual-axis uses custom label above)
+        if not self.dual_axis:
+            self.plot_widget.setTitle(self.title, color='#e0e0e0', size='12pt')
+        
+        self.plot_widget.setLabel('bottom', 'Time (s)', color='#e0e0e0')
+        self.plot_widget.showGrid(x=True, y=True, alpha=0.2)
+        self.plot_widget.getAxis('bottom').setPen('#3a3a3a')
+        self.plot_widget.getAxis('bottom').setTextPen('#e0e0e0')
+        
+        if self.dual_axis:
+            # Dual axis mode: Usage (%) on left, Frequency (MHz) on right
+            self.plot_widget.setLabel('left', 'Usage (%)', color='#e0e0e0')
+            self.plot_widget.getAxis('left').setPen('#3a3a3a')
+            self.plot_widget.getAxis('left').setTextPen('#e0e0e0')
+            self.plot_widget.setYRange(0, 100)
+            
+            # Create second Y-axis for frequency
+            self.viewbox2 = pg.ViewBox()
+            self.plot_widget.scene().addItem(self.viewbox2)
+            self.plot_widget.getAxis('right').linkToView(self.viewbox2)
+            self.viewbox2.setXLink(self.plot_widget)
+            self.plot_widget.getAxis('right').setLabel('Frequency (MHz)', color='#e0e0e0')
+            self.plot_widget.showAxis('right')
+            self.plot_widget.getAxis('right').setPen('#3a3a3a')
+            self.plot_widget.getAxis('right').setTextPen('#e0e0e0')
+            
+            # Update views when plot is resized
+            def update_views():
+                self.viewbox2.setGeometry(self.plot_widget.getViewBox().sceneBoundingRect())
+                self.viewbox2.linkedViewChanged(self.plot_widget.getViewBox(), self.viewbox2.XAxis)
+            
+            update_views()
+            self.plot_widget.getViewBox().sigResized.connect(update_views)
+            
+            # Create two curves with different colors (not line styles)
+            # Usage: original color (solid)
+            # Frequency: contrasting bright color (solid)
+            pen1 = pg.mkPen(color=line_color, width=2.5)
+            pen2 = pg.mkPen(color='#ffd93d', width=2.5)  # Bright yellow for frequency
+            self.curve = self.plot_widget.plot(pen=pen1, name='Usage')
+            self.curve2 = pg.PlotCurveItem(pen=pen2, name='Frequency')
+            self.viewbox2.addItem(self.curve2)
+            
+            # Add legend
+            legend = self.plot_widget.addLegend(offset=(10, 10))
+            legend.setLabelTextColor('#e0e0e0')
+        else:
+            # Single axis mode
+            self.plot_widget.setLabel('left', self.y_label, color='#e0e0e0')
+            self.plot_widget.getAxis('left').setPen('#3a3a3a')
+            self.plot_widget.getAxis('left').setTextPen('#e0e0e0')
+            
+            # Set Y range based on label type
+            if 'MHz' in self.y_label or 'Frequency' in self.y_label:
+                self.plot_widget.enableAutoRange(axis='y')
+            else:
+                self.plot_widget.setYRange(0, 100)
+            
+            pen = pg.mkPen(color=line_color, width=2)
+            self.curve = self.plot_widget.plot(pen=pen)
         
         layout.addWidget(self.plot_widget)
     
-    def update_data(self, value: float, timestamp: float = None):
-        """Update plot with new data point."""
+    def update_data(self, value: float, value2: float = None, timestamp: float = None):
+        """Update plot with new data point(s).
+        
+        Args:
+            value: Primary value (usage %)
+            value2: Secondary value (frequency MHz), used only if dual_axis=True
+            timestamp: Time stamp for x-axis
+        """
         if timestamp is None:
             if self.time_buffer:
                 timestamp = self.time_buffer[-1] + 1
@@ -80,17 +151,28 @@ class MonitorPlotWidget(QWidget):
         self.data_buffer.append(value)
         self.time_buffer.append(timestamp)
         
+        if self.dual_axis and value2 is not None:
+            self.data_buffer2.append(value2)
+        
         # Update plot
         if len(self.data_buffer) > 0:
             x = np.array(self.time_buffer)
             y = np.array(self.data_buffer)
             self.curve.setData(x, y)
+            
+            if self.dual_axis and len(self.data_buffer2) > 0:
+                y2 = np.array(self.data_buffer2)
+                self.curve2.setData(x, y2)
     
     def clear(self):
         """Clear all data."""
         self.data_buffer.clear()
         self.time_buffer.clear()
         self.curve.setData([], [])
+        
+        if self.dual_axis:
+            self.data_buffer2.clear()
+            self.curve2.setData([], [])
 
 
 class MultiLinePlotWidget(QWidget):

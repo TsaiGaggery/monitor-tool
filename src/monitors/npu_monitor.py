@@ -77,23 +77,68 @@ class NPUMonitor:
             'utilization': 0,
             'frequency': 0,
             'power': 0,
+            'memory_used': 0,
+            'max_frequency': 0,
             'available': True
         }
         
         try:
-            # Try to read from sysfs acceleration device
-            accel_path = '/sys/class/accel/accel0'
-            if os.path.exists(accel_path):
-                # Try to get device info
-                device_path = f'{accel_path}/device'
-                
-                # Check for frequency information
-                freq_file = f'{device_path}/freq'
+            # Try to read from PCI device sysfs (Intel VPU driver)
+            device_path = '/sys/class/accel/accel0/device'
+            if os.path.exists(device_path):
+                # Read current frequency
+                freq_file = f'{device_path}/npu_current_frequency_mhz'
                 if os.path.exists(freq_file):
                     try:
                         with open(freq_file, 'r') as f:
-                            freq = int(f.read().strip())
-                            info['frequency'] = freq / 1000000  # Hz to MHz
+                            info['frequency'] = int(f.read().strip())
+                    except:
+                        pass
+                
+                # Read max frequency
+                max_freq_file = f'{device_path}/npu_max_frequency_mhz'
+                if os.path.exists(max_freq_file):
+                    try:
+                        with open(max_freq_file, 'r') as f:
+                            info['max_frequency'] = int(f.read().strip())
+                    except:
+                        pass
+                
+                # Read memory utilization (in bytes)
+                mem_file = f'{device_path}/npu_memory_utilization'
+                if os.path.exists(mem_file):
+                    try:
+                        with open(mem_file, 'r') as f:
+                            mem_bytes = int(f.read().strip())
+                            info['memory_used'] = mem_bytes / (1024 * 1024)  # Convert to MB
+                    except:
+                        pass
+                
+                # Calculate utilization from busy time
+                # Read busy time in microseconds
+                busy_file = f'{device_path}/npu_busy_time_us'
+                if os.path.exists(busy_file):
+                    try:
+                        with open(busy_file, 'r') as f:
+                            busy_us = int(f.read().strip())
+                            
+                        # Store busy time for delta calculation
+                        if not hasattr(self, '_last_busy_us'):
+                            self._last_busy_us = busy_us
+                            self._last_time = __import__('time').time()
+                        else:
+                            import time
+                            current_time = time.time()
+                            time_delta = current_time - self._last_time
+                            busy_delta = busy_us - self._last_busy_us
+                            
+                            if time_delta > 0:
+                                # Calculate utilization percentage
+                                utilization = (busy_delta / (time_delta * 1000000)) * 100
+                                info['utilization'] = min(100, max(0, utilization))
+                            
+                            self._last_busy_us = busy_us
+                            self._last_time = current_time
                     except:
                         pass
                 
@@ -107,9 +152,24 @@ class NPUMonitor:
                     except:
                         pass
             
+            # Fallback: Try old paths
+            accel_path = '/sys/class/accel/accel0'
+            if os.path.exists(accel_path):
+                device_path_old = f'{accel_path}/device'
+                
+                # Check for frequency information (old path)
+                freq_file_old = f'{device_path_old}/freq'
+                if os.path.exists(freq_file_old) and info['frequency'] == 0:
+                    try:
+                        with open(freq_file_old, 'r') as f:
+                            freq = int(f.read().strip())
+                            info['frequency'] = freq / 1000000  # Hz to MHz
+                    except:
+                        pass
+            
             # Try to get utilization from debugfs (requires root)
             debugfs_path = '/sys/kernel/debug/dri/0/i915_vpu_usage'
-            if os.path.exists(debugfs_path):
+            if os.path.exists(debugfs_path) and info['utilization'] == 0:
                 try:
                     with open(debugfs_path, 'r') as f:
                         content = f.read()

@@ -338,16 +338,28 @@ class GPUMonitor:
                                     # Parse memory fields
                                     # Xe GPU uses GTT (Graphics Translation Table) memory
                                     for line in content.split('\n'):
-                                        if line.startswith('drm-total-gtt:'):
-                                            # Format: "drm-total-gtt:     25984 KiB"
-                                            parts = line.split(':')[1].strip().split()
-                                            if len(parts) >= 2 and parts[1] == 'KiB':
-                                                mem_kb = int(parts[0])
-                                                total_used += mem_kb * 1024
-                                        elif line.startswith('drm-total-system:'):
-                                            # Fallback for system memory
-                                            mem_kb = int(line.split(':')[1].strip())
-                                            total_used += mem_kb * 1024
+                                        if line.startswith('drm-total-gtt:') or line.startswith('drm-total-system:'):
+                                            # Format can be:
+                                            # "drm-total-gtt:     25984 KiB"
+                                            # "drm-total-system:  50060 KiB"
+                                            # "drm-total-stolen:  0"
+                                            try:
+                                                parts = line.split(':')[1].strip().split()
+                                                if len(parts) >= 1:
+                                                    mem_kb = int(parts[0])
+                                                    # If unit is specified, verify it's KiB
+                                                    # Otherwise assume bytes and convert
+                                                    if len(parts) >= 2:
+                                                        if parts[1] == 'KiB':
+                                                            total_used += mem_kb * 1024
+                                                        else:
+                                                            # Unknown unit, skip
+                                                            pass
+                                                    else:
+                                                        # No unit specified, assume already in bytes
+                                                        total_used += mem_kb
+                                            except (ValueError, IndexError):
+                                                pass
                         except (PermissionError, FileNotFoundError, ValueError):
                             continue
                 except (PermissionError, FileNotFoundError):
@@ -411,19 +423,11 @@ class GPUMonitor:
                             # Try Xe driver frequency (newer Intel GPUs)
                             xe_freq_path = f'/sys/class/drm/card{card_num}/device/tile0/gt0/freq0/act_freq'
                             if os.path.exists(xe_freq_path):
-                                # Read actual frequency first
+                                # Always use actual frequency (act_freq)
+                                # This is the real running frequency, 0 when idle
                                 with open(xe_freq_path, 'r') as f:
                                     act_freq = int(f.read().strip())
-                                
-                                # If actual frequency is 0, GPU is idle
-                                if act_freq > 0:
-                                    info['gpu_clock'] = act_freq
-                                else:
-                                    # GPU is idle, read current setting but don't use for utilization
-                                    cur_freq_path = f'/sys/class/drm/card{card_num}/device/tile0/gt0/freq0/cur_freq'
-                                    if os.path.exists(cur_freq_path):
-                                        with open(cur_freq_path, 'r') as cf:
-                                            info['gpu_clock'] = int(cf.read().strip())
+                                info['gpu_clock'] = act_freq
                                 
                                 # NOTE: Intel GPU sysfs does not provide actual utilization
                                 # act_freq indicates GPU activity (0 = idle, >0 = active)
@@ -432,16 +436,17 @@ class GPUMonitor:
                                 
                             # Try i915 driver frequency (older Intel GPUs)
                             elif os.path.exists(f'/sys/class/drm/card{card_num}/gt_cur_freq_mhz'):
-                                # Read actual frequency (gt_act_freq_mhz) for i915
+                                # Always use actual frequency (gt_act_freq_mhz) for i915
+                                # This is the real running frequency
                                 act_freq_path = f'/sys/class/drm/card{card_num}/gt_act_freq_mhz'
-                                cur_freq_path = f'/sys/class/drm/card{card_num}/gt_cur_freq_mhz'
                                 
                                 if os.path.exists(act_freq_path):
                                     with open(act_freq_path, 'r') as f:
                                         act_freq = int(f.read().strip())
-                                    info['gpu_clock'] = act_freq if act_freq > 0 else 0
+                                    info['gpu_clock'] = act_freq
                                 else:
-                                    # Fallback to cur_freq if act_freq not available
+                                    # If act_freq not available, fallback to cur_freq
+                                    cur_freq_path = f'/sys/class/drm/card{card_num}/gt_cur_freq_mhz'
                                     with open(cur_freq_path, 'r') as f:
                                         info['gpu_clock'] = int(f.read().strip())
                                 

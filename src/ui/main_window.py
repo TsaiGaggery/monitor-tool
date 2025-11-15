@@ -211,22 +211,25 @@ class MainWindow(QMainWindow):
         
         self.gpu_name_label = QLabel("GPU: -")
         self.gpu_usage_label = QLabel("Usage: -")
+        self.gpu_freq_label = QLabel("Frequency: -")
         self.gpu_temp_label = QLabel("Temperature: -")
         self.gpu_mem_label = QLabel("Memory: -")
         
         info_layout.addWidget(self.gpu_name_label, 0, 0, 1, 2)
         info_layout.addWidget(QLabel("Usage:"), 1, 0)
         info_layout.addWidget(self.gpu_usage_label, 1, 1)
-        info_layout.addWidget(QLabel("Temperature:"), 2, 0)
-        info_layout.addWidget(self.gpu_temp_label, 2, 1)
-        info_layout.addWidget(QLabel("Memory:"), 3, 0)
-        info_layout.addWidget(self.gpu_mem_label, 3, 1)
+        info_layout.addWidget(QLabel("Frequency:"), 2, 0)
+        info_layout.addWidget(self.gpu_freq_label, 2, 1)
+        info_layout.addWidget(QLabel("Temperature:"), 3, 0)
+        info_layout.addWidget(self.gpu_temp_label, 3, 1)
+        info_layout.addWidget(QLabel("Memory:"), 4, 0)
+        info_layout.addWidget(self.gpu_mem_label, 4, 1)
         
         info_group.setLayout(info_layout)
         layout.addWidget(info_group)
         
-        # GPU usage plot
-        self.gpu_usage_plot = MonitorPlotWidget("GPU Usage (%)")
+        # GPU usage and frequency plots
+        self.gpu_usage_plot = MonitorPlotWidget("GPU Usage (%) & Frequency (MHz)", dual_axis=True)
         layout.addWidget(self.gpu_usage_plot)
         
         return widget
@@ -256,8 +259,8 @@ class MainWindow(QMainWindow):
         info_group.setLayout(info_layout)
         layout.addWidget(info_group)
         
-        # NPU usage plot
-        self.npu_usage_plot = MonitorPlotWidget("NPU Usage (%)")
+        # NPU usage and frequency plots
+        self.npu_usage_plot = MonitorPlotWidget("NPU Usage (%) & Frequency (MHz)", dual_axis=True)
         layout.addWidget(self.npu_usage_plot)
         
         return widget
@@ -272,8 +275,15 @@ class MainWindow(QMainWindow):
         # Export submenu
         export_menu = file_menu.addMenu('Export Data')
         
+        # Export All action (default - Ctrl+E)
+        export_all_action = QAction('Export All Formats', self)
+        export_all_action.setShortcut('Ctrl+E')
+        export_all_action.triggered.connect(self.export_all)
+        export_menu.addAction(export_all_action)
+        
+        export_menu.addSeparator()
+        
         export_csv_action = QAction('Export to CSV', self)
-        export_csv_action.setShortcut('Ctrl+E')
         export_csv_action.triggered.connect(self.export_csv)
         export_menu.addAction(export_csv_action)
         
@@ -363,6 +373,12 @@ class MainWindow(QMainWindow):
                     self.gpu_name_label.setText(f"GPU: {gpu.get('name', 'Unknown')}")
                     self.gpu_usage_label.setText(f"{gpu_util}%")
                     
+                    gpu_freq = gpu.get('gpu_clock', 0)
+                    if gpu_freq > 0:
+                        self.gpu_freq_label.setText(f"{gpu_freq} MHz")
+                    else:
+                        self.gpu_freq_label.setText("N/A")
+                    
                     temp = gpu.get('temperature', 0)
                     if temp > 0:
                         self.gpu_temp_label.setText(f"{temp}°C")
@@ -376,8 +392,8 @@ class MainWindow(QMainWindow):
                     else:
                         self.gpu_mem_label.setText("N/A (driver required)")
                     
-                    # Update GPU plot
-                    self.gpu_usage_plot.update_data(gpu_util, current_time)
+                    # Update GPU plot with usage and frequency
+                    self.gpu_usage_plot.update_data(gpu_util, gpu_freq, current_time)
         else:
             self.gpu_info_label.setText("N/A")
         
@@ -388,11 +404,11 @@ class MainWindow(QMainWindow):
                 util = npu_info.get('utilization', 0)
                 freq = npu_info.get('frequency', 0)
                 
-                self.npu_usage_label.setText(f"{util}%")
+                self.npu_usage_label.setText(f"{util:.1f}%")
                 self.npu_freq_label.setText(f"{freq:.0f} MHz")
                 
-                # Update NPU plot
-                self.npu_usage_plot.update_data(util, current_time)
+                # Update NPU plot with usage and frequency
+                self.npu_usage_plot.update_data(util, freq, current_time)
         
         # Update plots
         self.overview_cpu_plot.update_data(cpu_usage, current_time)
@@ -432,6 +448,28 @@ class MainWindow(QMainWindow):
         if reply == QMessageBox.Yes:
             self.data_logger.cleanup_old_data(7)
             QMessageBox.information(self, 'Success', 'Old data cleaned up successfully')
+    
+    def export_all(self):
+        """Export monitoring data to all formats (CSV, JSON, HTML)."""
+        try:
+            if not self.data_exporter.session_data:
+                QMessageBox.warning(self, 'No Data', 'No monitoring data to export')
+                return
+            
+            # Export to all formats
+            csv_path = self.data_exporter.export_csv()
+            json_path = self.data_exporter.export_json()
+            html_path = self.data_exporter.export_html()
+            
+            # Show success message with all paths
+            QMessageBox.information(self, 'Export Successful', 
+                                   f'Data exported to all formats:\n\n'
+                                   f'CSV:  {csv_path}\n'
+                                   f'JSON: {json_path}\n'
+                                   f'HTML: {html_path}\n\n'
+                                   f'Samples: {len(self.data_exporter.session_data)}')
+        except Exception as e:
+            QMessageBox.critical(self, 'Export Failed', f'Error exporting data: {str(e)}')
     
     def export_csv(self):
         """Export monitoring data to CSV."""
