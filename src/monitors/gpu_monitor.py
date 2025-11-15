@@ -255,6 +255,112 @@ class GPUMonitor:
         except Exception as e:
             return None
     
+    def _get_xe_gpu_utilization(self, card_num: int = 0) -> Optional[float]:
+        """Calculate Xe GPU utilization using idle residency.
+        
+        For Xe driver, we calculate utilization from gt-c6 idle time:
+        utilization = 100 - (idle_time_delta / total_time_delta * 100)
+        
+        Args:
+            card_num: DRM card number (e.g., 0 for card0)
+            
+        Returns:
+            GPU utilization percentage (0-100) or None if unavailable
+        """
+        import time
+        
+        try:
+            idle_path = f'/sys/class/drm/card{card_num}/device/tile0/gt0/gtidle/idle_residency_ms'
+            
+            if not os.path.exists(idle_path):
+                return None
+            
+            # First sample
+            with open(idle_path, 'r') as f:
+                idle_ms1 = int(f.read().strip())
+            time1 = time.time()
+            
+            # Wait 100ms
+            time.sleep(0.1)
+            
+            # Second sample
+            with open(idle_path, 'r') as f:
+                idle_ms2 = int(f.read().strip())
+            time2 = time.time()
+            
+            # Calculate utilization
+            idle_delta_ms = idle_ms2 - idle_ms1
+            time_delta_ms = (time2 - time1) * 1000
+            
+            if time_delta_ms <= 0:
+                return None
+            
+            # Utilization = 100 - (idle_percentage)
+            idle_percentage = (idle_delta_ms / time_delta_ms) * 100
+            utilization = max(0, min(100, 100 - idle_percentage))
+            
+            return utilization
+            
+        except Exception as e:
+            return None
+    
+    def _get_xe_gpu_memory(self, card_num: int = 0) -> Optional[tuple]:
+        """Get Xe GPU memory usage from fdinfo.
+        
+        This aggregates memory usage across all GPU clients.
+        
+        Args:
+            card_num: DRM card number
+            
+        Returns:
+            Tuple of (used_bytes, total_bytes) or None
+        """
+        try:
+            # Read all process fdinfo for drm memory usage
+            total_used = 0
+            
+            # Scan /proc for all processes
+            for pid_dir in os.listdir('/proc'):
+                if not pid_dir.isdigit():
+                    continue
+                
+                fdinfo_dir = f'/proc/{pid_dir}/fdinfo'
+                if not os.path.exists(fdinfo_dir):
+                    continue
+                
+                try:
+                    for fd_file in os.listdir(fdinfo_dir):
+                        fd_path = os.path.join(fdinfo_dir, fd_file)
+                        try:
+                            with open(fd_path, 'r') as f:
+                                content = f.read()
+                                if 'drm-driver:' in content and 'xe' in content:
+                                    # Parse memory fields
+                                    for line in content.split('\n'):
+                                        if line.startswith('drm-total-system:'):
+                                            mem_kb = int(line.split(':')[1].strip())
+                                            total_used += mem_kb * 1024
+                        except (PermissionError, FileNotFoundError):
+                            continue
+                except (PermissionError, FileNotFoundError):
+                    continue
+            
+            # Get total system memory as GPU memory (integrated GPU uses system RAM)
+            try:
+                with open('/proc/meminfo', 'r') as f:
+                    for line in f:
+                        if line.startswith('MemTotal:'):
+                            total_kb = int(line.split()[1])
+                            total_bytes = total_kb * 1024
+                            return (total_used, total_bytes)
+            except Exception:
+                pass
+            
+            return (total_used, 0) if total_used > 0 else None
+            
+        except Exception as e:
+            return None
+    
     def get_intel_info(self) -> Dict:
         """Get Intel GPU information using sysfs (supports i915 and Xe drivers)."""
         info = {
@@ -339,11 +445,22 @@ class GPUMonitor:
                             break
             
             # Try to get real GPU utilization from debugfs (fast, direct)
+            # First try i915 driver (older Intel GPUs)
             util = self._get_intel_gpu_utilization_from_debugfs()
             if util is not None:
                 info['gpu_util'] = int(util)
+            else:
+                # Try Xe driver (newer Intel GPUs like Arc, Meteor Lake, etc.)
+                for card_num in range(5):
+                    xe_idle_path = f'/sys/class/drm/card{card_num}/device/tile0/gt0/gtidle/idle_residency_ms'
+                    if os.path.exists(xe_idle_path):
+                        util = self._get_xe_gpu_utilization(card_num)
+                        if util is not None:
+                            info['gpu_util'] = int(util)
+                            break
             
             # Try to get GPU memory usage from debugfs
+            # First try i915
             mem_info = self._get_intel_gpu_memory_from_debugfs()
             if mem_info is not None:
                 used_bytes, total_bytes = mem_info
@@ -351,6 +468,19 @@ class GPUMonitor:
                 info['memory_total'] = total_bytes // (1024 * 1024)  # Convert to MB
                 if total_bytes > 0:
                     info['memory_util'] = int((used_bytes / total_bytes) * 100)
+            else:
+                # Try Xe driver memory
+                for card_num in range(5):
+                    xe_idle_path = f'/sys/class/drm/card{card_num}/device/tile0/gt0/gtidle/idle_residency_ms'
+                    if os.path.exists(xe_idle_path):
+                        mem_info = self._get_xe_gpu_memory(card_num)
+                        if mem_info is not None:
+                            used_bytes, total_bytes = mem_info
+                            info['memory_used'] = used_bytes // (1024 * 1024)  # Convert to MB
+                            info['memory_total'] = total_bytes // (1024 * 1024)  # Convert to MB
+                            if total_bytes > 0:
+                                info['memory_util'] = int((used_bytes / total_bytes) * 100)
+                            break
             
             # Legacy code kept for reference (commented out)
             # Try intel_gpu_top for utilization (if available)

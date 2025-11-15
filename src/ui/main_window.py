@@ -10,9 +10,10 @@ from PyQt5.QtGui import QFont
 
 from monitors import CPUMonitor, GPUMonitor, MemoryMonitor, NPUMonitor
 from controllers import FrequencyController
-from storage import DataLogger
+from storage import DataLogger, DataExporter
 from ui.widgets.plot_widget import MonitorPlotWidget, MultiLinePlotWidget
 from ui.widgets.control_panel import ControlPanel
+from ui.styles import apply_dark_theme, CHART_COLORS
 
 import time
 
@@ -22,8 +23,11 @@ class MainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("System Monitor Tool")
+        self.setWindowTitle("System Monitor Tool - Pro Edition")
         self.setGeometry(100, 100, 1200, 800)
+        
+        # Store chart colors
+        self.chart_colors = CHART_COLORS
         
         # Initialize monitors
         self.cpu_monitor = CPUMonitor()
@@ -32,6 +36,7 @@ class MainWindow(QMainWindow):
         self.npu_monitor = NPUMonitor()
         self.freq_controller = FrequencyController()
         self.data_logger = DataLogger()
+        self.data_exporter = DataExporter()
         
         # Timing
         self.start_time = time.time()
@@ -264,6 +269,24 @@ class MainWindow(QMainWindow):
         # File menu
         file_menu = menubar.addMenu('File')
         
+        # Export submenu
+        export_menu = file_menu.addMenu('Export Data')
+        
+        export_csv_action = QAction('Export to CSV', self)
+        export_csv_action.setShortcut('Ctrl+E')
+        export_csv_action.triggered.connect(self.export_csv)
+        export_menu.addAction(export_csv_action)
+        
+        export_json_action = QAction('Export to JSON', self)
+        export_json_action.triggered.connect(self.export_json)
+        export_menu.addAction(export_json_action)
+        
+        export_html_action = QAction('Export to HTML Report', self)
+        export_html_action.triggered.connect(self.export_html)
+        export_menu.addAction(export_html_action)
+        
+        file_menu.addSeparator()
+        
         exit_action = QAction('Exit', self)
         exit_action.setShortcut('Ctrl+Q')
         exit_action.triggered.connect(self.close)
@@ -275,6 +298,10 @@ class MainWindow(QMainWindow):
         cleanup_action = QAction('Cleanup Old Data', self)
         cleanup_action.triggered.connect(self.cleanup_data)
         tools_menu.addAction(cleanup_action)
+        
+        clear_export_action = QAction('Clear Export Session', self)
+        clear_export_action.triggered.connect(self.clear_export_session)
+        tools_menu.addAction(clear_export_action)
         
         # Help menu
         help_menu = menubar.addMenu('Help')
@@ -378,6 +405,18 @@ class MainWindow(QMainWindow):
         self.data_logger.log_data(cpu_info, memory_info, gpu_info, 
                                   npu_info if self.npu_monitor.available else None)
         
+        # Add data to exporter
+        export_data = {
+            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'time_seconds': current_time,
+            'cpu': cpu_info,
+            'memory': memory_info,
+            'gpu': gpu_info
+        }
+        if self.npu_monitor.available:
+            export_data['npu'] = npu_info
+        self.data_exporter.add_sample(export_data)
+        
         # Update status bar
         self.status_bar.showMessage(
             f"Last update: {time.strftime('%H:%M:%S')} | "
@@ -394,12 +433,68 @@ class MainWindow(QMainWindow):
             self.data_logger.cleanup_old_data(7)
             QMessageBox.information(self, 'Success', 'Old data cleaned up successfully')
     
+    def export_csv(self):
+        """Export monitoring data to CSV."""
+        try:
+            if not self.data_exporter.session_data:
+                QMessageBox.warning(self, 'No Data', 'No monitoring data to export')
+                return
+            
+            filepath = self.data_exporter.export_csv()
+            QMessageBox.information(self, 'Export Successful', 
+                                   f'Data exported to:\n{filepath}\n\n'
+                                   f'Samples: {len(self.data_exporter.session_data)}')
+        except Exception as e:
+            QMessageBox.critical(self, 'Export Failed', f'Error exporting data: {str(e)}')
+    
+    def export_json(self):
+        """Export monitoring data to JSON."""
+        try:
+            if not self.data_exporter.session_data:
+                QMessageBox.warning(self, 'No Data', 'No monitoring data to export')
+                return
+            
+            filepath = self.data_exporter.export_json()
+            QMessageBox.information(self, 'Export Successful', 
+                                   f'Data exported to:\n{filepath}\n\n'
+                                   f'Samples: {len(self.data_exporter.session_data)}')
+        except Exception as e:
+            QMessageBox.critical(self, 'Export Failed', f'Error exporting data: {str(e)}')
+    
+    def export_html(self):
+        """Export monitoring data to HTML report."""
+        try:
+            if not self.data_exporter.session_data:
+                QMessageBox.warning(self, 'No Data', 'No monitoring data to export')
+                return
+            
+            filepath = self.data_exporter.export_html()
+            QMessageBox.information(self, 'Export Successful', 
+                                   f'Report generated:\n{filepath}\n\n'
+                                   f'Samples: {len(self.data_exporter.session_data)}')
+        except Exception as e:
+            QMessageBox.critical(self, 'Export Failed', f'Error exporting data: {str(e)}')
+    
+    def clear_export_session(self):
+        """Clear current export session data."""
+        reply = QMessageBox.question(self, 'Clear Session',
+                                    'Clear current export session data?\n'
+                                    'This will reset the data collection for exports.',
+                                    QMessageBox.Yes | QMessageBox.No,
+                                    QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            self.data_exporter.clear_session()
+            QMessageBox.information(self, 'Session Cleared', 'Export session data has been cleared')
+    
     def show_about(self):
         """Show about dialog."""
         QMessageBox.about(self, 'About System Monitor Tool',
-                         'System Monitor Tool v1.0\n\n'
+                         'System Monitor Tool - Pro Edition v1.0\n\n'
                          'Real-time CPU/GPU/NPU/Memory monitoring\n'
                          'with frequency control capabilities.\n\n'
+                         'Supports Intel i915 and Xe GPUs\n'
+                         'Export to CSV, JSON, and HTML formats\n\n'
                          'Built with PyQt5 and pyqtgraph')
     
     def closeEvent(self, event):

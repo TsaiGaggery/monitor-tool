@@ -197,10 +197,12 @@ $CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/tee /sys/class/drm/card*/device/tile*
 $CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/tee /sys/class/drm/card*/gt_*_freq_mhz
 $CURRENT_USER ALL=(ALL) NOPASSWD: /bin/sh -c echo * > /sys/class/drm/card*/device/tile*/gt*/freq0/*
 $CURRENT_USER ALL=(ALL) NOPASSWD: /bin/sh -c echo * > /sys/class/drm/card*/gt_*_freq_mhz
+# Allow monitor-tool to run intel_gpu_top without password (for Intel GPU utilization)
+$CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/intel_gpu_top
 EOF"
     
     sudo chmod 0440 "$SUDOERS_FILE"
-    echo -e "${GREEN}Sudoers configuration created (CPU + GPU frequency control)${NC}"
+    echo -e "${GREEN}Sudoers configuration created (CPU + GPU frequency control + intel_gpu_top)${NC}"
 else
     echo "Skipped. You'll need to run with sudo for frequency control."
 fi

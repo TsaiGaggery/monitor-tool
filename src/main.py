@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PyQt5.QtWidgets import QApplication
 from ui.main_window import MainWindow
+from ui.styles import apply_dark_theme
 
 
 def main():
@@ -16,6 +17,9 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("System Monitor Tool")
     app.setOrganizationName("MonitorTool")
+    
+    # Apply dark theme
+    chart_colors = apply_dark_theme(app)
     
     window = MainWindow()
     window.show()
