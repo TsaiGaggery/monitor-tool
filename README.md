@@ -137,10 +137,7 @@ For servers without GUI or remote SSH sessions, use the CLI version:
 - ✅ Export to CSV, JSON, HTML
 - ✅ Configurable update interval
 - ✅ Low resource usage
-
-**Known Limitation:**
-- ⚠️ Data logging pauses when in frequency control menus ('c' or 'g')
-- 📝 TODO: Implement background threading to continue logging during menu navigation
+- ✅ Background threading - continuous logging even during menu navigation
 
 ### Frequency Control (requires sudo)
 The installer can configure passwordless sudo for frequency control.
