@@ -378,6 +378,82 @@ monitor-tool/
 sudo apt-get remove monitor-tool
 ```
 
+## 測試
+
+本專案包含全面的測試套件，共有 152 個單元測試，涵蓋所有監控模組。
+
+### 執行測試
+
+```bash
+# 執行所有測試
+pytest tests/unit/
+
+# 執行並顯示覆蓋率報告
+pytest tests/unit/ --cov=src --cov-report=term-missing
+
+# 執行特定測試檔案
+pytest tests/unit/test_cpu_monitor.py -v
+
+# 執行特定測試類別或函數
+pytest tests/unit/test_gpu_monitor.py::TestGPUMonitorDetection -v
+pytest tests/unit/test_data_exporter.py::TestDataExporterHTML::test_export_html -v
+```
+
+### 測試覆蓋率
+
+目前覆蓋率（監控 + 儲存模組，不含 UI）：
+- **記憶體監控**: 100%
+- **網路監控**: 96%
+- **磁碟監控**: 88%
+- **資料記錄器**: 87%
+- **NPU 監控**: 75%
+- **資料匯出器**: 67%
+- **CPU 監控**: 59%
+- **GPU 監控**: 44%
+- **總計**: 40%
+
+### 測試結構
+
+```
+tests/
+├── unit/                    # 使用 mock 的單元測試
+│   ├── test_cpu_monitor.py
+│   ├── test_gpu_monitor.py
+│   ├── test_npu_monitor.py
+│   ├── test_memory_monitor.py
+│   ├── test_network_monitor.py
+│   ├── test_disk_monitor.py
+│   ├── test_data_logger.py
+│   └── test_data_exporter.py
+├── manual_test.py           # 手動測試腳本（無 GUI）
+└── README.md                # 測試文件
+```
+
+### 開發環境設定
+
+```bash
+# 安裝開發相依套件
+pip install -r requirements.txt
+
+# requirements.txt 包含：
+# - pytest >= 7.0.0
+# - pytest-cov >= 4.0.0
+# - pytest-mock >= 3.10.0
+```
+
+### CI/CD 整合
+
+測試可整合到 CI/CD 流程中：
+
+```bash
+# 用於 CI 環境
+pytest tests/unit/ --cov=src --cov-report=xml --cov-report=term
+
+# 產生 HTML 覆蓋率報告
+pytest tests/unit/ --cov=src --cov-report=html
+# 檢視報告：htmlcov/index.html
+```
+
 ## 授權
 
 MIT License - 詳見 `debian/copyright`

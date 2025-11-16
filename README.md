@@ -492,6 +492,82 @@ A: You can adjust in the configuration file:
 - Reduce `max_points`
 - Enable `low_overhead_mode`
 
+## Testing
+
+The project includes a comprehensive test suite with 152 unit tests covering all monitoring modules.
+
+### Running Tests
+
+```bash
+# Run all tests
+pytest tests/unit/
+
+# Run with coverage report
+pytest tests/unit/ --cov=src --cov-report=term-missing
+
+# Run specific test file
+pytest tests/unit/test_cpu_monitor.py -v
+
+# Run specific test class or function
+pytest tests/unit/test_gpu_monitor.py::TestGPUMonitorDetection -v
+pytest tests/unit/test_data_exporter.py::TestDataExporterHTML::test_export_html -v
+```
+
+### Test Coverage
+
+Current coverage (monitors + storage modules, UI excluded):
+- **Memory Monitor**: 100%
+- **Network Monitor**: 96%
+- **Disk Monitor**: 88%
+- **Data Logger**: 87%
+- **NPU Monitor**: 75%
+- **Data Exporter**: 67%
+- **CPU Monitor**: 59%
+- **GPU Monitor**: 44%
+- **Overall**: 40%
+
+### Test Structure
+
+```
+tests/
+├── unit/                    # Unit tests with mocked dependencies
+│   ├── test_cpu_monitor.py
+│   ├── test_gpu_monitor.py
+│   ├── test_npu_monitor.py
+│   ├── test_memory_monitor.py
+│   ├── test_network_monitor.py
+│   ├── test_disk_monitor.py
+│   ├── test_data_logger.py
+│   └── test_data_exporter.py
+├── manual_test.py           # Manual testing script (no GUI)
+└── README.md                # Test documentation
+```
+
+### Development Setup
+
+```bash
+# Install development dependencies
+pip install -r requirements.txt
+
+# The requirements include:
+# - pytest >= 7.0.0
+# - pytest-cov >= 4.0.0
+# - pytest-mock >= 3.10.0
+```
+
+### CI/CD Integration
+
+Tests can be integrated into CI/CD pipelines:
+
+```bash
+# For CI environments
+pytest tests/unit/ --cov=src --cov-report=xml --cov-report=term
+
+# Generate HTML coverage report
+pytest tests/unit/ --cov=src --cov-report=html
+# View report: htmlcov/index.html
+```
+
 ## Technical Features
 
 - **Low overhead design**: Minimal system impact
