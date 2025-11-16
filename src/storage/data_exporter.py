@@ -199,7 +199,25 @@ class DataExporter:
         Returns:
             HTML string with interactive charts
         """
-        duration = datetime.now() - self.start_time
+        # Calculate duration from actual data timestamps
+        if self.session_data and len(self.session_data) >= 2:
+            try:
+                # Parse first and last timestamps
+                first_ts = self.session_data[0].get('timestamp', '')
+                last_ts = self.session_data[-1].get('timestamp', '')
+                
+                if first_ts and last_ts:
+                    # Try to parse timestamps
+                    from datetime import datetime
+                    first_time = datetime.strptime(first_ts, '%Y-%m-%d %H:%M:%S')
+                    last_time = datetime.strptime(last_ts, '%Y-%m-%d %H:%M:%S')
+                    duration = last_time - first_time
+                else:
+                    duration = datetime.now() - self.start_time
+            except:
+                duration = datetime.now() - self.start_time
+        else:
+            duration = datetime.now() - self.start_time
         
         # Prepare chart data - extract ALL available data
         timestamps = []
@@ -569,7 +587,7 @@ class DataExporter:
         
         <div class="grid-2col">
             <div class="chart-container">
-                <div class="chart-title">GPU Usage (%)</div>
+                <div class="chart-title">GPU Usage (%) & Frequency (MHz)</div>
                 <canvas id="gpuUsageChart"></canvas>
             </div>
             <div class="chart-container">
@@ -579,19 +597,14 @@ class DataExporter:
         </div>
         
         <div class="grid-2col">
-            <div class="chart-container">
-                <div class="chart-title">GPU Frequency (MHz)</div>
-                <canvas id="gpuFreqChart"></canvas>
-            </div>
             <div class="chart-container" id="gpuTempContainer">
                 <div class="chart-title">🌡️ GPU Temperature (°C)</div>
                 <canvas id="gpuTempChart"></canvas>
             </div>
-        </div>
-        
-        <div class="chart-container" id="gpuPowerContainer">
-            <div class="chart-title">⚡ GPU Power Consumption (W)</div>
-            <canvas id="gpuPowerChart"></canvas>
+            <div class="chart-container" id="gpuPowerContainer">
+                <div class="chart-title">⚡ GPU Power Consumption (W)</div>
+                <canvas id="gpuPowerChart"></canvas>
+            </div>
         </div>
         
         <!-- Memory Charts Section -->
@@ -875,19 +888,29 @@ class DataExporter:
             }}
         }});
         
-        // GPU Usage Chart
+        // GPU Usage & Frequency Chart (Dual Y-axis)
         new Chart(document.getElementById('gpuUsageChart'), {{
             type: 'line',
             data: {{
                 labels: chartData.timestamps,
                 datasets: [{{
-                    label: 'GPU Usage',
+                    label: 'GPU Usage (%)',
                     data: chartData.gpu.usage,
                     borderColor: '#4ecdc4',
                     backgroundColor: 'rgba(78, 205, 196, 0.1)',
                     borderWidth: 2,
                     tension: 0.3,
-                    fill: true
+                    fill: true,
+                    yAxisID: 'y'
+                }}, {{
+                    label: 'GPU Frequency (MHz)',
+                    data: chartData.gpu.freq,
+                    borderColor: '#ffd93d',
+                    backgroundColor: 'rgba(255, 217, 61, 0.1)',
+                    borderWidth: 2,
+                    tension: 0.3,
+                    fill: false,
+                    yAxisID: 'y1'
                 }}]
             }},
             options: {{
@@ -896,9 +919,21 @@ class DataExporter:
                     ...commonOptions.scales,
                     y: {{
                         ...commonOptions.scales.y,
-                        title: {{ display: true, text: 'Usage (%)', color: '#e0e0e0' }},
+                        type: 'linear',
+                        position: 'left',
+                        title: {{ display: true, text: 'Usage (%)', color: '#4ecdc4' }},
                         min: 0,
                         max: 100
+                    }},
+                    y1: {{
+                        type: 'linear',
+                        position: 'right',
+                        title: {{ display: true, text: 'Frequency (MHz)', color: '#ffd93d' }},
+                        ticks: {{ color: '#888' }},
+                        grid: {{ 
+                            drawOnChartArea: false,
+                            color: '#3a3a3a'
+                        }}
                     }}
                 }}
             }}
@@ -912,16 +947,16 @@ class DataExporter:
                 datasets: [{{
                     label: 'GPU Memory Used',
                     data: chartData.gpu.memory_used,
-                    borderColor: '#95e1d3',
-                    backgroundColor: 'rgba(149, 225, 211, 0.1)',
+                    borderColor: '#4ecdc4',
+                    backgroundColor: 'rgba(78, 205, 196, 0.1)',
                     borderWidth: 2,
                     tension: 0.3,
                     fill: true
                 }}, {{
                     label: 'GPU Memory Utilization',
                     data: chartData.gpu.memory_util,
-                    borderColor: '#14ffec',
-                    backgroundColor: 'rgba(20, 255, 236, 0.1)',
+                    borderColor: '#ff6b6b',
+                    backgroundColor: 'rgba(255, 107, 107, 0.1)',
                     borderWidth: 2,
                     tension: 0.3,
                     fill: true,
@@ -944,33 +979,6 @@ class DataExporter:
                         min: 0,
                         max: 100,
                         grid: {{ drawOnChartArea: false }}
-                    }}
-                }}
-            }}
-        }});
-        
-        // GPU Frequency Chart
-        new Chart(document.getElementById('gpuFreqChart'), {{
-            type: 'line',
-            data: {{
-                labels: chartData.timestamps,
-                datasets: [{{
-                    label: 'GPU Frequency',
-                    data: chartData.gpu.freq,
-                    borderColor: '#14ffec',
-                    backgroundColor: 'rgba(20, 255, 236, 0.1)',
-                    borderWidth: 2,
-                    tension: 0.3,
-                    fill: true
-                }}]
-            }},
-            options: {{
-                ...commonOptions,
-                scales: {{
-                    ...commonOptions.scales,
-                    y: {{
-                        ...commonOptions.scales.y,
-                        title: {{ display: true, text: 'Frequency (MHz)', color: '#e0e0e0' }}
                     }}
                 }}
             }}
@@ -1159,6 +1167,16 @@ class DataExporter:
                 }}
             }});
         }}
+        
+        // Add double-click to reset zoom for all charts
+        document.querySelectorAll('canvas').forEach(canvas => {{
+            canvas.addEventListener('dblclick', function() {{
+                const chart = Chart.getChart(canvas);
+                if (chart && chart.resetZoom) {{
+                    chart.resetZoom();
+                }}
+            }});
+        }});
     </script>
 </body>
 </html>

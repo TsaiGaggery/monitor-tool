@@ -187,6 +187,48 @@ python src/main.py
 
 ## 進階用法
 
+### CLI 模式（無 GUI / Server 環境）
+
+對於沒有圖形介面的伺服器或透過 SSH 遠端連線，可以使用 CLI 版本：
+
+```bash
+# 互動式儀表板（每秒更新，類似 htop）
+./monitor-tool-cli
+
+# 帶 CPU/GPU 頻率控制（按 'c' 控制 CPU，'g' 控制 GPU）
+./monitor-tool-cli
+
+# 單次快照簡單格式（適合腳本）
+./monitor-tool-cli --once --format simple
+# 輸出: CPU: 45.2% | Mem: 62.3% | GPU: 12% | Net: ↑0.5 ↓2.3 MB/s | Disk: R1.2 W0.8 MB/s
+
+# JSON 格式（用於自動化）
+./monitor-tool-cli --once --format json > status.json
+
+# 執行並在按 'q' 退出時匯出 HTML
+./monitor-tool-cli --export-format html --output report.html
+
+# 執行並在退出時匯出 CSV
+./monitor-tool-cli -e csv
+
+# 自訂更新間隔
+./monitor-tool-cli --interval 2.0
+```
+
+**CLI 功能特點：**
+- ✅ 無 GUI 依賴（可透過 SSH 使用）
+- ✅ 即時文字儀表板（curses 介面）
+- ✅ CPU/GPU 頻率控制（按 'c'/'g'）
+- ✅ 多種輸出格式（text、json、simple）
+- ✅ 資料記錄至 SQLite（預設啟用）
+- ✅ 匯出為 CSV、JSON、HTML
+- ✅ 可配置更新間隔
+- ✅ 低資源消耗
+
+**已知限制：**
+- ⚠️ 在頻率控制選單中（'c' 或 'g'）資料記錄會暫停
+- 📝 待辦：實作背景執行緒以在選單操作時繼續記錄資料
+
 ### 頻率控制（需要 sudo）
 安裝時選擇「yes」進行 sudoers 設定，以啟用無密碼頻率控制。
 

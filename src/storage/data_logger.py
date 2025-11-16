@@ -32,7 +32,7 @@ class DataLogger:
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS monitoring_data (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                timestamp DATETIME DEFAULT (datetime('now', 'localtime')),
                 cpu_usage REAL,
                 cpu_freq REAL,
                 cpu_temp REAL,

@@ -100,6 +100,48 @@ Edit `config/default.yaml` to customize:
 
 ## Advanced Usage
 
+### CLI Mode (Headless/Server Environments)
+
+For servers without GUI or remote SSH sessions, use the CLI version:
+
+```bash
+# Interactive dashboard (updates every second, like htop)
+./monitor-tool-cli
+
+# With CPU/GPU frequency control (press 'c' for CPU, 'g' for GPU)
+./monitor-tool-cli
+
+# Single snapshot in simple format (for scripts)
+./monitor-tool-cli --once --format simple
+# Output: CPU: 45.2% | Mem: 62.3% | GPU: 12% | Net: ↑0.5 ↓2.3 MB/s | Disk: R1.2 W0.8 MB/s
+
+# JSON format for automation
+./monitor-tool-cli --once --format json > status.json
+
+# Run and export HTML when you press 'q' to exit
+./monitor-tool-cli --export-format html --output report.html
+
+# Run and export CSV on exit
+./monitor-tool-cli -e csv
+
+# Custom update interval
+./monitor-tool-cli --interval 2.0
+```
+
+**CLI Features:**
+- ✅ No GUI dependencies (works over SSH)
+- ✅ Real-time text dashboard with curses
+- ✅ CPU/GPU frequency control (press 'c'/'g')
+- ✅ Multiple output formats (text, json, simple)
+- ✅ Data logging to SQLite (always enabled)
+- ✅ Export to CSV, JSON, HTML
+- ✅ Configurable update interval
+- ✅ Low resource usage
+
+**Known Limitation:**
+- ⚠️ Data logging pauses when in frequency control menus ('c' or 'g')
+- 📝 TODO: Implement background threading to continue logging during menu navigation
+
 ### Frequency Control (requires sudo)
 The installer can configure passwordless sudo for frequency control.
 During installation, select "yes" when prompted.
@@ -165,6 +207,7 @@ This is normal when GPU is idle. GPU usage monitoring varies by hardware:
 - **Intel Xe GPU**: Estimated from frequency (act_freq). Usage increases when running graphics applications
 - **Intel i915 GPU**: Requires `intel_gpu_top` (sudo access)
 - **NVIDIA GPU**: Requires NVIDIA drivers installed
+
   ```bash
   sudo apt install nvidia-driver-550  # Or recommended version
   sudo reboot

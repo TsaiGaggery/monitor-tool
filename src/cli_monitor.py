@@ -15,6 +15,8 @@ import time
 import argparse
 import signal
 import json
+import shutil
+import curses
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -23,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from monitors import CPUMonitor, MemoryMonitor, GPUMonitor, NPUMonitor, NetworkMonitor, DiskMonitor
 from storage import DataLogger, DataExporter
+from controllers import FrequencyController
 
 
 class CLIMonitor:
@@ -33,11 +36,14 @@ class CLIMonitor:
         
         Args:
             update_interval: Update interval in seconds
-            enable_logging: Enable SQLite logging
+            enable_logging: Enable SQLite logging (deprecated, always enabled)
         """
         self.update_interval = update_interval
-        self.enable_logging = enable_logging
+        self.enable_logging = enable_logging  # Kept for compatibility, but ignored
         self.running = False
+        
+        # Get terminal size
+        self.term_width, self.term_height = shutil.get_terminal_size((80, 24))
         
         # Initialize monitors
         self.cpu_monitor = CPUMonitor()
@@ -47,8 +53,14 @@ class CLIMonitor:
         self.network_monitor = NetworkMonitor()
         self.disk_monitor = DiskMonitor()
         
-        # Initialize logger if enabled
-        self.logger = DataLogger() if enable_logging else None
+        # Initialize frequency controller
+        self.freq_controller = FrequencyController()
+        
+        # Always initialize logger (like GUI does)
+        self.logger = DataLogger()
+        
+        # Track session start time for export
+        self.session_start_time = None
         
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -130,177 +142,733 @@ class CLIMonitor:
             parts.append(f"GPU: {gpu_util}%")
             
         if net['io_stats']:
-            net_up = net['io_stats'].get('upload_speed', 0)
-            net_down = net['io_stats'].get('download_speed', 0)
+            net_up = net['io_stats'].get('upload_speed', 0) / (1024 * 1024)  # bytes/s to MB/s
+            net_down = net['io_stats'].get('download_speed', 0) / (1024 * 1024)  # bytes/s to MB/s
             parts.append(f"Net: ↑{net_up:.1f} ↓{net_down:.1f} MB/s")
             
         if disk['io_stats']:
-            disk_read = disk['io_stats'].get('read_speed', 0)
-            disk_write = disk['io_stats'].get('write_speed', 0)
+            disk_read = disk['io_stats'].get('read_speed', 0) / (1024 * 1024)  # bytes/s to MB/s
+            disk_write = disk['io_stats'].get('write_speed', 0) / (1024 * 1024)  # bytes/s to MB/s
             parts.append(f"Disk: R{disk_read:.1f} W{disk_write:.1f} MB/s")
             
         return " | ".join(parts)
         
     def _format_dashboard(self, data: Dict) -> str:
-        """Format data as a full dashboard."""
+        """Format data as a well-organized dashboard with two-column layout."""
         lines = []
-        lines.append("=" * 80)
-        lines.append(f" System Monitor - {data['timestamp']}")
-        lines.append("=" * 80)
+        width = self.term_width
+        half_width = width // 2 - 2
         
-        # CPU Section
+        # Header
+        lines.append("=" * width)
+        title = f" System Monitor - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        lines.append(title.ljust(width))
+        lines.append("=" * width)
+        
+        # Prepare sections
+        left_lines = []
+        right_lines = []
+        
+        # LEFT COLUMN - CPU
         cpu = data['cpu']
-        lines.append("\n📊 CPU")
-        lines.append(f"  Overall: {self._format_bar(cpu['usage']['total'])}")
-        lines.append(f"  Cores: {cpu['cpu_count']} (Physical: {cpu['physical_count']})")
-        lines.append(f"  Frequency: {cpu['frequency']['average']:.0f} MHz")
+        left_lines.append("📊 CPU")
+        left_lines.append(f"  Overall: {self._format_bar(cpu['usage']['total'], 20)}")
+        left_lines.append(f"  Cores: {cpu['cpu_count']} (Phys: {cpu['physical_count']})")
+        left_lines.append(f"  Freq: {cpu['frequency']['average']:.0f} MHz")
         
-        # Show top 8 cores
-        lines.append("  Per-core usage:")
-        for i in range(min(8, len(cpu['usage']['per_core']))):
-            usage = cpu['usage']['per_core'][i]
-            lines.append(f"    Core {i:2d}: {self._format_bar(usage, 15)}")
-            
         # Temperature
         temps = cpu['temperature']
         if temps:
             for sensor_name, readings in temps.items():
                 if readings:
                     temp = readings[0]['current']
-                    label = readings[0]['label']
-                    lines.append(f"  {label}: {temp:.1f}°C")
-                    
-        # Memory Section
+                    left_lines.append(f"  Temp: {temp:.1f}°C")
+                break
+        
+        # Per-core usage (all cores, compact format)
+        left_lines.append("  Cores:")
+        cores = cpu['usage']['per_core']
+        for i in range(0, len(cores), 2):
+            core_line = f"  {i:2d}:{cores[i]:4.0f}%"
+            if i + 1 < len(cores):
+                core_line += f" {i+1:2d}:{cores[i+1]:4.0f}%"
+            left_lines.append(core_line)
+        
+        # RIGHT COLUMN - Memory
         mem_data = data['memory']
         mem = mem_data['memory']
         swap = mem_data['swap']
         
-        lines.append("\n💾 Memory")
-        lines.append(f"  RAM:  {self._format_bar(mem['percent'])}")
-        lines.append(f"        {mem['used']:.2f} / {mem['total']:.2f} GB (Available: {mem['available']:.2f} GB)")
-        if swap['total'] > 0:
-            lines.append(f"  Swap: {self._format_bar(swap['percent'])}")
-            lines.append(f"        {swap['used']:.2f} / {swap['total']:.2f} GB")
+        right_lines.append("💾 Memory")
+        right_lines.append(f"  RAM: {self._format_bar(mem['percent'], 20)}")
+        
+        # Show memory speed if available
+        mem_speed = mem.get('speed', 0)
+        if mem_speed > 0:
+            right_lines.append(f"  {mem['used']:.1f} / {mem['total']:.1f} GB @ {mem_speed} MT/s")
+        else:
+            right_lines.append(f"  {mem['used']:.1f} / {mem['total']:.1f} GB")
             
-        # GPU Section
+        if swap['total'] > 0 and swap['percent'] > 1:
+            right_lines.append(f"  Swap: {swap['percent']:.1f}%")
+            right_lines.append(f"  {swap['used']:.1f} / {swap['total']:.1f} GB")
+        
+        # GPU in right column
         gpu = data['gpu']
         if gpu['available'] and gpu['gpus']:
-            lines.append("\n🎮 GPU")
-            for gpu_info in gpu['gpus']:
-                lines.append(f"  GPU {gpu_info['id']} ({gpu_info['type']})")
-                if 'name' in gpu_info:
-                    lines.append(f"    Name: {gpu_info['name']}")
-                    
-                gpu_util = gpu_info.get('gpu_util', 0)
-                lines.append(f"    Usage: {self._format_bar(gpu_util)}")
+            right_lines.append("")
+            right_lines.append("🎮 GPU")
+            for i, gpu_data in enumerate(gpu['gpus'][:1]):  # Show first GPU only
+                name = gpu_data.get('name', 'GPU')[:20]  # Truncate long names
+                right_lines.append(f"  {name}")
                 
-                if 'temperature' in gpu_info and gpu_info['temperature'] > 0:
-                    lines.append(f"    Temp: {gpu_info['temperature']}°C")
-                    
-                if 'memory_total' in gpu_info and gpu_info['memory_total'] > 0:
-                    mem_used = gpu_info.get('memory_used', 0)
-                    mem_total = gpu_info['memory_total']
-                    mem_percent = (mem_used / mem_total * 100) if mem_total > 0 else 0
-                    lines.append(f"    Memory: {self._format_bar(mem_percent)}")
-                    lines.append(f"            {mem_used:.0f} / {mem_total:.0f} MB")
-                    
-                if 'gpu_clock' in gpu_info and gpu_info['gpu_clock'] > 0:
-                    lines.append(f"    Clock: {gpu_info['gpu_clock']} MHz")
-                    
-        # NPU Section
+                util = gpu_data.get('gpu_util', 0)
+                right_lines.append(f"  Load: {self._format_bar(util, 20)}")
+                
+                mem_used = gpu_data.get('memory_used', 0)
+                mem_total = gpu_data.get('memory_total', 1)
+                mem_pct = (mem_used / mem_total * 100) if mem_total > 0 else 0
+                right_lines.append(f"  VRAM: {mem_pct:4.1f}%")
+                right_lines.append(f"  {mem_used:.0f}/{mem_total:.0f} MB")
+                
+                # GPU Clock - always show for Intel GPU (0 when idle is valid)
+                clock = gpu_data.get('clock_graphics', 0) or gpu_data.get('gpu_clock', 0)
+                # Always show GPU clock (0 MHz means idle, which is valid info)
+                right_lines.append(f"  GPU Clock: {clock} MHz")
+                
+                # Memory Clock - only show if non-zero (Intel integrated GPU doesn't have separate memory clock)
+                mem_clock = gpu_data.get('clock_memory', 0) or gpu_data.get('memory_clock', 0)
+                if mem_clock > 0:
+                    right_lines.append(f"  Mem Clock: {mem_clock} MHz")
+        
+        # Combine left and right columns
+        lines.append("".ljust(width))
+        
+        # Add section headers on the same line
+        header_line = f"{'📊 CPU':<{half_width}}  {'💾 Memory':<{half_width}}"
+        lines.append(header_line.ljust(width))
+        
+        # Skip the first line (title) from both columns as we already added them
+        left_content = left_lines[1:]  # Skip "📊 CPU"
+        right_content = right_lines[1:]  # Skip "💾 Memory"
+        
+        max_lines = max(len(left_content), len(right_content))
+        for i in range(max_lines):
+            left = left_content[i] if i < len(left_content) else ""
+            right = right_content[i] if i < len(right_content) else ""
+            combined = f"{left:<{half_width}}  {right:<{half_width}}"
+            lines.append(combined.ljust(width))
+        
+        # NPU Section (if available, full width)
         npu = data['npu']
         if npu.get('available'):
-            lines.append("\n🧠 NPU")
-            lines.append(f"  Platform: {npu.get('platform', 'Unknown')}")
+            lines.append("".ljust(width))
+            lines.append("🧠 NPU".ljust(width))
+            lines.append(f"  Device: {npu.get('device_name', 'Unknown')}".ljust(width))
             util = npu.get('utilization', 0)
-            lines.append(f"  Usage: {self._format_bar(util)}")
-            if 'frequency' in npu and npu['frequency'] > 0:
-                lines.append(f"  Frequency: {npu['frequency']} MHz")
-            if 'power' in npu and npu['power'] > 0:
-                lines.append(f"  Power: {npu['power']:.2f} W")
-                
-        # Network Section
+            lines.append(f"  Usage: {self._format_bar(util, 30)}".ljust(width))
+            if npu.get('power', 0) > 0:
+                lines.append(f"  Power: {npu['power']:.2f} W".ljust(width))
+        
+        # Network Section (simplified)
         net = data['network']
         if net['io_stats']:
             io = net['io_stats']
-            lines.append("\n🌐 Network")
-            lines.append(f"  Upload:   {io['upload_speed']:8.2f} MB/s  (Total: {self._format_bytes(io['bytes_sent'])})")
-            lines.append(f"  Download: {io['download_speed']:8.2f} MB/s  (Total: {self._format_bytes(io['bytes_recv'])})")
-            lines.append(f"  Packets:  Sent {io['packets_sent']:,} / Recv {io['packets_recv']:,}")
+            # Convert bytes/sec to MB/s (1 MB = 1024 * 1024 bytes)
+            up = io.get('upload_speed', 0) / (1024 * 1024)
+            down = io.get('download_speed', 0) / (1024 * 1024)
             
-        # Active interfaces
-        if net['interfaces']:
-            lines.append("  Active Interfaces:")
-            for iface in net['interfaces'][:5]:  # Show top 5
-                lines.append(f"    {iface['name']}: {iface['status']}")
-                
-        # Disk Section
+            lines.append("".ljust(width))
+            lines.append("🌐 Network".ljust(width))
+            lines.append(f"  ↑ {up:6.2f} MB/s    ↓ {down:6.2f} MB/s".ljust(width))
+            lines.append(f"  Packets: TX {io['packets_sent']:,} / RX {io['packets_recv']:,}".ljust(width))
+        
+        # Show active interfaces (compact)
+        if net['interfaces'] and net['interface_stats']:
+            active_ifaces = [(name, net['interface_stats'].get(name, {})) 
+                           for name in net['interfaces'] 
+                           if net['interface_stats'].get(name, {}).get('is_up', False)][:3]
+            if active_ifaces:
+                iface_list = ", ".join([name for name, _ in active_ifaces])
+                lines.append(f"  Active: {iface_list}".ljust(width))
+        
+        # Disk Section (simplified)
         disk = data['disk']
         if disk['io_stats']:
             io = disk['io_stats']
-            lines.append("\n💿 Disk I/O")
-            lines.append(f"  Read:  {io['read_speed']:8.2f} MB/s  ({io['read_iops']:6.0f} IOPS)")
-            lines.append(f"  Write: {io['write_speed']:8.2f} MB/s  ({io['write_iops']:6.0f} IOPS)")
-            lines.append(f"  Total: Read {self._format_bytes(io['read_bytes'])} / Write {self._format_bytes(io['write_bytes'])}")
-            
-        # Partition usage
-        if disk['partitions']:
-            lines.append("  Partitions:")
-            for part in disk['partitions'][:5]:  # Show top 5
-                lines.append(f"    {part['mountpoint']:20s} {self._format_bar(part['percent'], 10)}")
-                lines.append(f"      {self._format_bytes(part['used'])} / {self._format_bytes(part['total'])} ({part['fstype']})")
-                
-        lines.append("\n" + "=" * 80)
-        return "\n".join(lines)
+            # Prefer pre-calculated MB/s values if available
+            read_speed = io.get('read_speed_mb', io.get('read_speed', 0) / (1024 * 1024))
+            write_speed = io.get('write_speed_mb', io.get('write_speed', 0) / (1024 * 1024))
+            lines.append("".ljust(width))
+            lines.append("💿 Disk I/O".ljust(width))
+            lines.append(f"  R {read_speed:6.2f} MB/s ({io['read_iops']:5.0f} IOPS)    W {write_speed:6.2f} MB/s ({io['write_iops']:5.0f} IOPS)".ljust(width))
         
-    def run_interactive(self):
-        """Run interactive monitoring with live updates."""
-        self.running = True
-        print("🚀 Starting CLI Monitor (Press Ctrl+C to stop)...\n")
-        time.sleep(1)
+        # Partition usage (compact, main partitions only)
+        if disk['partition_usage']:
+            main_parts = [p for p in disk['partition_usage'] 
+                         if not p['path'].startswith('/snap')][:3]
+            if main_parts:
+                lines.append("  Storage:".ljust(width))
+                for part in main_parts:
+                    path = part['path'][:20]  # Truncate long paths
+                    lines.append(f"    {path:20s} {self._format_bar(part['percent'], 12)} {part['used']:5.0f}/{part['total']:5.0f} GB".ljust(width))
+        
+        # Footer
+        lines.append("".ljust(width))
+        lines.append("=" * width)
+        footer = f"⏱  {self.update_interval}s | 'q' quit | 'c' CPU ctrl | 'g' GPU ctrl"
+        lines.append(footer.ljust(width))
+        
+        # Pad to terminal height to prevent scrolling
+        while len(lines) < self.term_height - 1:
+            lines.append("".ljust(width))
+        
+        return "\n".join(lines)
+    
+    def run_interactive(self, export_format: Optional[str] = None, export_output: Optional[str] = None):
+        """Run interactive monitoring with live updates using curses.
+        
+        Args:
+            export_format: Export format when exiting (csv/json/html)
+            export_output: Output filename for export
+        """
+        # Record session start time (UTC for SQLite compatibility)
+        from datetime import datetime, timezone, timedelta
+        # SQLite CURRENT_TIMESTAMP is UTC, so we need to store UTC time for comparison
+        utc_now = datetime.now(timezone.utc)
+        self.session_start_time = utc_now.strftime('%Y-%m-%d %H:%M:%S')
         
         try:
-            while self.running:
-                self._clear_screen()
-                data = self._get_all_data()
-                
-                # Log data if enabled
-                if self.logger:
-                    self.logger.log_data(
-                        cpu_usage=data['cpu']['usage']['total'],
-                        memory_usage=data['memory']['memory']['percent'],
-                        gpu_usage=data['gpu']['gpus'][0].get('gpu_util', 0) if data['gpu']['available'] and data['gpu']['gpus'] else 0,
-                        npu_usage=data['npu'].get('utilization', 0),
-                        network_upload=data['network']['io_stats'].get('upload_speed', 0) if data['network']['io_stats'] else 0,
-                        network_download=data['network']['io_stats'].get('download_speed', 0) if data['network']['io_stats'] else 0,
-                        disk_read=data['disk']['io_stats'].get('read_speed', 0) if data['disk']['io_stats'] else 0,
-                        disk_write=data['disk']['io_stats'].get('write_speed', 0) if data['disk']['io_stats'] else 0,
-                    )
-                    
-                print(self._format_dashboard(data))
-                print(f"\n⏱  Update interval: {self.update_interval}s | Logging: {'ON' if self.logger else 'OFF'}")
-                
-                time.sleep(self.update_interval)
-                
+            curses.wrapper(lambda stdscr: self._run_curses(stdscr, export_format, export_output))
         except KeyboardInterrupt:
             pass
-            
+        finally:
+            self.running = False
+        
+        # Export on exit if requested (only this session's data)
+        if export_format:
+            print(f"\n📊 Exporting session data...")
+            utc_end = datetime.now(timezone.utc)
+            session_end_time = utc_end.strftime('%Y-%m-%d %H:%M:%S')
+            # Display local time for user
+            local_start = utc_now.astimezone()
+            local_end = utc_end.astimezone()
+            print(f"   Session: {local_start.strftime('%Y-%m-%d %H:%M:%S')} to {local_end.strftime('%Y-%m-%d %H:%M:%S')} (local time)")
+            self.export_data(
+                format=export_format, 
+                output_file=export_output,
+                start_time=self.session_start_time,
+                end_time=session_end_time
+            )
+        
         print("\n✓ Monitor stopped")
+    
+    def _show_cpu_control_menu(self, stdscr):
+        """Show CPU frequency and governor control menu."""
+        # Save current settings
+        old_curs = curses.curs_set(0)
+        try:
+            curses.curs_set(1)  # Show cursor
+        except:
+            pass
+        
+        stdscr.nodelay(0)    # Blocking input
+        stdscr.timeout(-1)   # Wait indefinitely for input
+        
+        height, width = stdscr.getmaxyx()
+        
+        # Get current info
+        freq_range = self.freq_controller.get_cpu_freq_range()
+        governors = self.freq_controller.get_available_cpu_governors()
+        current_gov = self.freq_controller.get_current_cpu_governor()
+        
+        while True:
+            stdscr.clear()
+            
+            # Title
+            title = "=== CPU Control Menu ==="
+            stdscr.addstr(0, (width - len(title)) // 2, title)
+            
+            # Current status
+            row = 2
+            stdscr.addstr(row, 2, f"Current Governor: {current_gov}")
+            row += 1
+            if freq_range:
+                stdscr.addstr(row, 2, f"Freq Range: {freq_range.get('scaling_min', 0):.0f} - {freq_range.get('scaling_max', 0):.0f} MHz")
+                row += 1
+                stdscr.addstr(row, 2, f"HW Limits: {freq_range.get('hardware_min', 0):.0f} - {freq_range.get('hardware_max', 0):.0f} MHz")
+                row += 2
+            
+            # Menu options
+            stdscr.addstr(row, 2, "1. Set Governor")
+            row += 1
+            stdscr.addstr(row, 2, "2. Set Frequency Range")
+            row += 1
+            stdscr.addstr(row, 2, "3. Performance Mode (max freq)")
+            row += 1
+            stdscr.addstr(row, 2, "4. Powersave Mode")
+            row += 1
+            stdscr.addstr(row, 2, "q. Back to Monitor")
+            row += 2
+            
+            stdscr.addstr(row, 2, "Choice: ")
+            stdscr.refresh()
+            
+            # Get input - use getch() for single character
+            key = stdscr.getch()
+            choice = chr(key) if key < 256 else ''
+            
+            if choice == 'q' or choice == '':
+                break
+            elif choice == '1':
+                # Set governor
+                self._set_governor_interactive(stdscr, governors)
+                current_gov = self.freq_controller.get_current_cpu_governor()
+            elif choice == '2':
+                # Set frequency range
+                self._set_cpu_freq_interactive(stdscr, freq_range)
+                freq_range = self.freq_controller.get_cpu_freq_range()
+            elif choice == '3':
+                # Performance mode
+                if self.freq_controller.set_cpu_performance_mode():
+                    stdscr.addstr(row + 2, 2, "✓ Set to Performance mode (press any key)")
+                    current_gov = 'performance'
+                else:
+                    stdscr.addstr(row + 2, 2, "✗ Failed (check sudo permissions) (press any key)")
+                stdscr.refresh()
+                stdscr.getch()
+            elif choice == '4':
+                # Powersave mode
+                if self.freq_controller.set_cpu_powersave_mode():
+                    stdscr.addstr(row + 2, 2, "✓ Set to Powersave mode (press any key)")
+                    current_gov = 'powersave'
+                else:
+                    stdscr.addstr(row + 2, 2, "✗ Failed (check sudo permissions) (press any key)")
+                stdscr.refresh()
+                stdscr.getch()
+        
+        # Restore settings
+        try:
+            curses.curs_set(0)  # Hide cursor
+        except:
+            pass
+        stdscr.nodelay(1)    # Non-blocking input
+        stdscr.timeout(100)  # Restore timeout
+
+    
+    def _set_governor_interactive(self, stdscr, governors):
+        """Interactive governor selection."""
+        # Enable echo for input
+        curses.echo()
+        
+        height, width = stdscr.getmaxyx()
+        stdscr.clear()
+        
+        row = 2
+        stdscr.addstr(row, 2, "Available Governors:")
+        row += 1
+        
+        for i, gov in enumerate(governors, 1):
+            stdscr.addstr(row, 4, f"{i}. {gov}")
+            row += 1
+        
+        row += 1
+        stdscr.addstr(row, 2, "Select governor (number): ")
+        stdscr.refresh()
+        
+        choice = stdscr.getstr(row, 28, 5).decode('utf-8').strip()
+        
+        # Disable echo
+        curses.noecho()
+        
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(governors):
+                gov = governors[idx]
+                if self.freq_controller.set_cpu_governor(gov):
+                    stdscr.addstr(row + 2, 2, f"✓ Governor set to {gov} (press any key)")
+                else:
+                    stdscr.addstr(row + 2, 2, "✗ Failed to set governor (press any key)")
+            else:
+                stdscr.addstr(row + 2, 2, "✗ Invalid choice (press any key)")
+        except ValueError:
+            stdscr.addstr(row + 2, 2, "✗ Invalid input (press any key)")
+        
+        stdscr.refresh()
+        stdscr.getch()
+    
+    def _set_cpu_freq_interactive(self, stdscr, freq_range):
+        """Interactive CPU frequency range setting."""
+        # Enable echo for input
+        curses.echo()
+        
+        height, width = stdscr.getmaxyx()
+        stdscr.clear()
+        
+        row = 2
+        hw_min = freq_range.get('hardware_min', 800)
+        hw_max = freq_range.get('hardware_max', 5000)
+        
+        stdscr.addstr(row, 2, f"Hardware limits: {hw_min:.0f} - {hw_max:.0f} MHz")
+        row += 2
+        
+        stdscr.addstr(row, 2, f"Min frequency (MHz): ")
+        stdscr.refresh()
+        min_str = stdscr.getstr(row, 23, 10).decode('utf-8').strip()
+        
+        row += 1
+        stdscr.addstr(row, 2, f"Max frequency (MHz): ")
+        stdscr.refresh()
+        max_str = stdscr.getstr(row, 23, 10).decode('utf-8').strip()
+        
+        # Disable echo
+        curses.noecho()
+        
+        try:
+            min_freq = int(min_str)
+            max_freq = int(max_str)
+            
+            if min_freq > max_freq:
+                stdscr.addstr(row + 2, 2, "✗ Min cannot be greater than max (press any key)")
+            elif min_freq < hw_min or max_freq > hw_max:
+                stdscr.addstr(row + 2, 2, f"✗ Out of range {hw_min:.0f}-{hw_max:.0f} (press any key)")
+            else:
+                if self.freq_controller.set_cpu_freq_range(min_freq, max_freq):
+                    stdscr.addstr(row + 2, 2, f"✓ Frequency range set to {min_freq}-{max_freq} MHz (press any key)")
+                else:
+                    stdscr.addstr(row + 2, 2, "✗ Failed to set frequency (press any key)")
+        except ValueError:
+            stdscr.addstr(row + 2, 2, "✗ Invalid input (press any key)")
+        
+        stdscr.refresh()
+        stdscr.getch()
+    
+    def _show_gpu_control_menu(self, stdscr):
+        """Show GPU frequency control menu."""
+        # Save current settings
+        try:
+            curses.curs_set(1)  # Show cursor
+        except:
+            pass
+        
+        stdscr.nodelay(0)    # Blocking input
+        stdscr.timeout(-1)   # Wait indefinitely
+        
+        height, width = stdscr.getmaxyx()
+        
+        # Get current info
+        freq_range = self.freq_controller.get_gpu_freq_range()
+        
+        if not freq_range:
+            stdscr.clear()
+            stdscr.addstr(2, 2, "✗ GPU frequency control not available")
+            stdscr.addstr(3, 2, "Press any key to return...")
+            stdscr.refresh()
+            stdscr.getch()
+            try:
+                curses.curs_set(0)
+            except:
+                pass
+            stdscr.nodelay(1)
+            stdscr.timeout(100)
+            return
+        
+        while True:
+            stdscr.clear()
+            
+            # Title
+            title = "=== GPU Control Menu ==="
+            stdscr.addstr(0, (width - len(title)) // 2, title)
+            
+            # Current status
+            row = 2
+            stdscr.addstr(row, 2, f"GPU Type: {freq_range.get('type', 'Unknown')}")
+            row += 1
+            stdscr.addstr(row, 2, f"Card: {freq_range.get('card', 'Unknown')}")
+            row += 1
+            stdscr.addstr(row, 2, f"Current: {freq_range.get('current', 0)} MHz")
+            row += 1
+            stdscr.addstr(row, 2, f"Range: {freq_range.get('scaling_min', 0)} - {freq_range.get('scaling_max', 0)} MHz")
+            row += 1
+            stdscr.addstr(row, 2, f"HW Limits: {freq_range.get('hardware_min', 0)} - {freq_range.get('hardware_max', 0)} MHz")
+            row += 2
+            
+            # Menu options
+            stdscr.addstr(row, 2, "1. Set GPU Frequency Range")
+            row += 1
+            stdscr.addstr(row, 2, "2. Lock to Max Frequency")
+            row += 1
+            stdscr.addstr(row, 2, "3. Lock to Min Frequency")
+            row += 1
+            stdscr.addstr(row, 2, "q. Back to Monitor")
+            row += 2
+            
+            stdscr.addstr(row, 2, "Choice: ")
+            stdscr.refresh()
+            
+            # Get input - use getch() for single character
+            key = stdscr.getch()
+            choice = chr(key) if key < 256 else ''
+            
+            if choice == 'q' or choice == '':
+                break
+            elif choice == '1':
+                # Set frequency range
+                self._set_gpu_freq_interactive(stdscr, freq_range)
+                freq_range = self.freq_controller.get_gpu_freq_range()
+            elif choice == '2':
+                # Max frequency
+                hw_max = freq_range.get('hardware_max', 0)
+                if self.freq_controller.set_gpu_freq_range(hw_max, hw_max):
+                    stdscr.addstr(row + 2, 2, f"✓ GPU locked to max {hw_max} MHz (press any key)")
+                else:
+                    stdscr.addstr(row + 2, 2, "✗ Failed (check sudo permissions) (press any key)")
+                stdscr.refresh()
+                stdscr.getch()
+                freq_range = self.freq_controller.get_gpu_freq_range()
+            elif choice == '3':
+                # Min frequency
+                hw_min = freq_range.get('hardware_min', 0)
+                if self.freq_controller.set_gpu_freq_range(hw_min, hw_min):
+                    stdscr.addstr(row + 2, 2, f"✓ GPU locked to min {hw_min} MHz (press any key)")
+                else:
+                    stdscr.addstr(row + 2, 2, "✗ Failed (check sudo permissions) (press any key)")
+                stdscr.refresh()
+                stdscr.getch()
+                freq_range = self.freq_controller.get_gpu_freq_range()
+        
+        # Restore settings
+        try:
+            curses.curs_set(0)  # Hide cursor
+        except:
+            pass
+        stdscr.nodelay(1)    # Non-blocking input
+        stdscr.timeout(100)  # Restore timeout
+    
+    def _set_gpu_freq_interactive(self, stdscr, freq_range):
+        """Interactive GPU frequency range setting."""
+        # Enable echo for input
+        curses.echo()
+        
+        height, width = stdscr.getmaxyx()
+        stdscr.clear()
+        
+        row = 2
+        hw_min = freq_range.get('hardware_min', 0)
+        hw_max = freq_range.get('hardware_max', 0)
+        
+        stdscr.addstr(row, 2, f"Hardware limits: {hw_min} - {hw_max} MHz")
+        row += 2
+        
+        stdscr.addstr(row, 2, f"Min frequency (MHz): ")
+        stdscr.refresh()
+        min_str = stdscr.getstr(row, 23, 10).decode('utf-8').strip()
+        
+        row += 1
+        stdscr.addstr(row, 2, f"Max frequency (MHz): ")
+        stdscr.refresh()
+        max_str = stdscr.getstr(row, 23, 10).decode('utf-8').strip()
+        
+        # Disable echo
+        curses.noecho()
+        
+        try:
+            min_freq = int(min_str)
+            max_freq = int(max_str)
+            
+            if min_freq > max_freq:
+                stdscr.addstr(row + 2, 2, "✗ Min cannot be greater than max (press any key)")
+            elif min_freq < hw_min or max_freq > hw_max:
+                stdscr.addstr(row + 2, 2, f"✗ Out of range {hw_min}-{hw_max} (press any key)")
+            else:
+                if self.freq_controller.set_gpu_freq_range(min_freq, max_freq):
+                    stdscr.addstr(row + 2, 2, f"✓ GPU frequency set to {min_freq}-{max_freq} MHz (press any key)")
+                else:
+                    stdscr.addstr(row + 2, 2, "✗ Failed to set frequency (press any key)")
+        except ValueError:
+            stdscr.addstr(row + 2, 2, "✗ Invalid input (press any key)")
+        
+        stdscr.refresh()
+        stdscr.getch()
+
+    
+    def _run_curses(self, stdscr, export_format: Optional[str] = None, export_output: Optional[str] = None):
+        """Run monitoring loop with curses for flicker-free updates."""
+        self.running = True
+        
+        # Configure curses
+        curses.curs_set(0)  # Hide cursor
+        stdscr.nodelay(1)   # Non-blocking input
+        stdscr.timeout(100) # Refresh timeout
+        
+        # Get screen size
+        height, width = stdscr.getmaxyx()
+        self.term_height = height
+        self.term_width = width
+        
+        export_msg = f" | Export on exit: {export_format.upper()}" if export_format else ""
+        stdscr.addstr(0, 0, f"🚀 Starting CLI Monitor (Press 'q' to stop{export_msg})...")
+        stdscr.refresh()
+        time.sleep(1)
+        
+        last_update = time.time()
+        
+        while self.running:
+            try:
+                # Check for user input (Ctrl+C or 'q' to quit)
+                key = stdscr.getch()
+                if key == ord('q') or key == 3:  # 'q' or Ctrl+C
+                    break
+                elif key == ord('c'):  # CPU control menu
+                    self._show_cpu_control_menu(stdscr)
+                    stdscr.clear()  # Clear after menu
+                    last_update = time.time()  # Reset timer after menu
+                elif key == ord('g'):  # GPU control menu
+                    self._show_gpu_control_menu(stdscr)
+                    stdscr.clear()  # Clear after menu
+                    last_update = time.time()  # Reset timer after menu
+                
+                # Check if it's time to update
+                current_time = time.time()
+                if current_time - last_update < self.update_interval:
+                    time.sleep(0.05)  # Short sleep to avoid busy waiting
+                    continue
+                
+                last_update = current_time
+                
+                # Get all monitoring data
+                data = self._get_all_data()
+                
+                # Log data to database
+                self.logger.log_data(
+                    cpu_info=data['cpu'],
+                    memory_info=data['memory'],
+                    gpu_info=data['gpu'],
+                    npu_info=data['npu']
+                )
+                
+                # Clear screen and draw dashboard
+                stdscr.clear()
+                dashboard = self._format_dashboard(data)
+                
+                # Draw each line
+                for i, line in enumerate(dashboard.split('\n')):
+                    if i < height:
+                        try:
+                            stdscr.addstr(i, 0, line[:width-1])
+                        except curses.error:
+                            pass  # Ignore errors at screen edge
+                
+                stdscr.refresh()
+                
+                # No sleep here - controlled by last_update timing
+                
+            except KeyboardInterrupt:
+                break
+        
+        self.running = False
         
     def export_data(self, format: str = 'csv', output_file: Optional[str] = None, 
                    start_time: Optional[str] = None, end_time: Optional[str] = None):
         """Export logged data.
         
         Args:
-            format: Export format ('csv' or 'json')
+            format: Export format ('csv', 'json', or 'html')
             output_file: Output file path (auto-generated if None)
             start_time: Start time filter (ISO format)
             end_time: End time filter (ISO format)
         """
-        if not self.logger:
-            print("❌ Logging is not enabled. Cannot export data.")
-            return
-            
+        # For HTML export, we need to use the session-based DataExporter
+        if format == 'html':
+            # Load data from database and export
+            try:
+                import sqlite3
+                conn = sqlite3.connect(self.logger.db_path)
+                cursor = conn.cursor()
+                
+                # Build query with time filters
+                query = "SELECT * FROM monitoring_data"
+                params = []
+                if start_time or end_time:
+                    conditions = []
+                    if start_time:
+                        conditions.append("timestamp >= ?")
+                        params.append(start_time)
+                    if end_time:
+                        conditions.append("timestamp <= ?")
+                        params.append(end_time)
+                    query += " WHERE " + " AND ".join(conditions)
+                query += " ORDER BY timestamp"
+                
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
+                columns = [desc[0] for desc in cursor.description]
+                conn.close()
+                
+                print(f"   Found {len(rows)} data points")
+                
+                if not rows:
+                    print("❌ No data found for the specified time range")
+                    return
+                
+                # Create exporter and add samples
+                exporter = DataExporter()
+                first_timestamp = None  # Renamed to avoid conflict with parameter
+                
+                for i, row in enumerate(rows):
+                    data = dict(zip(columns, row))
+                    
+                    # Parse full data from JSON field
+                    try:
+                        full_data = json.loads(data.get('data_json', '{}'))
+                    except:
+                        full_data = {}
+                    
+                    # Calculate time_seconds from start
+                    timestamp_str = data.get('timestamp', '')
+                    if first_timestamp is None and timestamp_str:
+                        # Convert UTC timestamp to datetime object
+                        from datetime import datetime, timezone
+                        utc_time = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+                        first_timestamp = utc_time.astimezone()  # Convert to local time
+                    
+                    if first_timestamp and timestamp_str:
+                        utc_time = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+                        current_time = utc_time.astimezone()  # Convert to local time
+                        time_seconds = (current_time - first_timestamp).total_seconds()
+                        # Use local time string for display
+                        timestamp_local = current_time.strftime('%Y-%m-%d %H:%M:%S')
+                    else:
+                        time_seconds = i
+                        timestamp_local = timestamp_str
+                    
+                    # Build sample in GUI format (with full data from JSON)
+                    sample = {
+                        'timestamp': timestamp_local,
+                        'time_seconds': time_seconds,
+                        'cpu': full_data.get('cpu', {}),
+                        'memory': full_data.get('memory', {}),
+                        'gpu': full_data.get('gpu', {}),
+                        'npu': full_data.get('npu', {}),
+                    }
+                    exporter.add_sample(sample)
+                
+                # Export to HTML
+                if not output_file:
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    output_file = f"monitor_report_{timestamp}.html"
+                
+                filepath = exporter.export_html(output_file)
+                print(f"✓ HTML report exported to {filepath}")
+                return
+                
+            except Exception as e:
+                print(f"❌ HTML export failed: {e}")
+                import traceback
+                traceback.print_exc()
+                return
+        
+        # For CSV/JSON, use the database exporter
         exporter = DataExporter(self.logger.db_path)
         
         if not output_file:
@@ -329,17 +897,19 @@ Examples:
   # With faster updates
   %(prog)s --interval 0.5
   
-  # Enable logging to SQLite
-  %(prog)s --log
+  # Run and export HTML when you press 'q' to exit
+  %(prog)s --export-format html --output report.html
+  
+  # Run and export CSV on exit
+  %(prog)s -e csv
   
   # Single snapshot in JSON format
   %(prog)s --once --format json
   
-  # Export logged data to CSV
-  %(prog)s --export --format csv --output report.csv
-  
   # Simple one-line output (good for scripts)
   %(prog)s --once --format simple
+  
+Note: Logging is always enabled. Use --export-format to auto-export when you quit.
         """
     )
     
@@ -348,12 +918,6 @@ Examples:
         type=float,
         default=1.0,
         help='Update interval in seconds (default: 1.0)'
-    )
-    
-    parser.add_argument(
-        '--log', '-l',
-        action='store_true',
-        help='Enable SQLite logging'
     )
     
     parser.add_argument(
@@ -366,7 +930,7 @@ Examples:
         '--format', '-f',
         choices=['text', 'json', 'simple'],
         default='text',
-        help='Output format (default: text)'
+        help='Output format for --once mode (default: text)'
     )
     
     parser.add_argument(
@@ -376,16 +940,9 @@ Examples:
     )
     
     parser.add_argument(
-        '--export', '-e',
-        action='store_true',
-        help='Export logged data (requires --log to have been used previously)'
-    )
-    
-    parser.add_argument(
-        '--export-format',
-        choices=['csv', 'json'],
-        default='csv',
-        help='Export format (default: csv)'
+        '--export-format', '-e',
+        choices=['csv', 'json', 'html'],
+        help='Export logged data from database (csv/json/html)'
     )
     
     parser.add_argument(
@@ -402,27 +959,19 @@ Examples:
     
     args = parser.parse_args()
     
-    # Create monitor instance
-    monitor = CLIMonitor(
-        update_interval=args.interval,
-        enable_logging=args.log
-    )
+    # Create monitor instance (logging always enabled)
+    monitor = CLIMonitor(update_interval=args.interval)
     
     try:
-        if args.export:
-            # Export mode
-            monitor.export_data(
-                format=args.export_format,
-                output_file=args.output,
-                start_time=args.start_time,
-                end_time=args.end_time
-            )
-        elif args.once:
+        if args.once:
             # Single display mode
             monitor.display_once(format=args.format, output_file=args.output)
         else:
-            # Interactive mode
-            monitor.run_interactive()
+            # Interactive mode (with optional export on exit)
+            monitor.run_interactive(
+                export_format=args.export_format,
+                export_output=args.output
+            )
             
     except Exception as e:
         print(f"\n❌ Error: {e}")
