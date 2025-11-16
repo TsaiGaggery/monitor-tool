@@ -10,6 +10,14 @@ __pycache__/
 *$py.class
 *.so
 
+# Testing
+.coverage
+.pytest_cache/
+htmlcov/
+.tox/
+*.cover
+coverage.xml
+
 # Build artifacts
 build/
 dist/
