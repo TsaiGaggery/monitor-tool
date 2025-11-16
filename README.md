@@ -322,7 +322,7 @@ MIT License - Issues and PRs welcome!
 - SQLite database storage
 - Historical data queries
 - Statistical analysis
-- Automatic old data cleanup
+- **Auto cleanup**: Old data (>3 days) automatically deleted on startup
 - Export to CSV/JSON/HTML formats
 - Interactive HTML charts with zoom/pan
 
@@ -413,7 +413,8 @@ Frequency control requires root privileges. Options:
 ### Monitoring Data
 
 - Database location: `~/.monitor-tool/monitor_data.db`
-- Default retention: 7 days of historical data
+- **Auto cleanup**: Data older than 3 days automatically deleted on every startup
+- Disk space automatically reclaimed after cleanup (VACUUM)
 - Manual cleanup via menu: "Tools → Cleanup Old Data"
 - Export via menu: "File → Export Data" (CSV, JSON, HTML)
 

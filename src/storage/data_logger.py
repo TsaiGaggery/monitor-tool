@@ -12,7 +12,13 @@ import os
 class DataLogger:
     """Log monitoring data to SQLite database."""
     
-    def __init__(self, db_path: str = None):
+    def __init__(self, db_path: str = None, auto_cleanup_days: int = 3):
+        """Initialize data logger.
+        
+        Args:
+            db_path: Path to SQLite database file
+            auto_cleanup_days: Automatically delete data older than this many days (default: 3)
+        """
         if db_path is None:
             # Default to ~/.monitor-tool/data.db
             home = os.path.expanduser('~')
@@ -23,7 +29,12 @@ class DataLogger:
         self.db_path = db_path
         self.conn = None
         self.db_lock = threading.Lock()  # Thread-safe database access
+        self.auto_cleanup_days = auto_cleanup_days
         self.init_database()
+        
+        # Auto cleanup old data on initialization
+        if auto_cleanup_days > 0:
+            self.cleanup_old_data(days=auto_cleanup_days)
     
     def init_database(self):
         """Initialize database schema."""
@@ -176,19 +187,46 @@ class DataLogger:
         
         return {}
     
-    def cleanup_old_data(self, days: int = 7):
-        """Remove data older than specified days (thread-safe)."""
+    def cleanup_old_data(self, days: int = 7) -> int:
+        """Remove data older than specified days (thread-safe).
+        
+        Args:
+            days: Delete data older than this many days
+            
+        Returns:
+            Number of records deleted
+        """
         with self.db_lock:
             try:
                 cursor = self.conn.cursor()
+                
+                # Count records to be deleted
+                cursor.execute('''
+                    SELECT COUNT(*) FROM monitoring_data
+                    WHERE timestamp < datetime('now', '-' || ? || ' days')
+                ''', (days,))
+                count_before = cursor.fetchone()[0]
+                
+                if count_before == 0:
+                    return 0
+                
+                # Delete old records
                 cursor.execute('''
                     DELETE FROM monitoring_data
                     WHERE timestamp < datetime('now', '-' || ? || ' days')
                 ''', (days,))
                 self.conn.commit()
-                print(f"Cleaned up data older than {days} days")
+                
+                deleted_count = cursor.rowcount
+                print(f"🗑️  Cleaned up {deleted_count:,} records older than {days} days")
+                
+                # Vacuum to reclaim space
+                cursor.execute('VACUUM')
+                
+                return deleted_count
             except Exception as e:
                 print(f"Error cleaning up data: {e}")
+                return 0
     
     def close(self):
         """Close database connection (thread-safe)."""
