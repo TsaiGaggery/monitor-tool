@@ -17,6 +17,7 @@ import signal
 import json
 import shutil
 import curses
+import threading
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -61,6 +62,11 @@ class CLIMonitor:
         
         # Track session start time for export
         self.session_start_time = None
+        
+        # Background logging thread
+        self.logging_thread = None
+        self.logging_lock = threading.Lock()
+        self.latest_data = None
         
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -325,6 +331,54 @@ class CLIMonitor:
         
         return "\n".join(lines)
     
+    def _background_logging_worker(self):
+        """Background thread worker for continuous data logging."""
+        next_log_time = time.time()
+        
+        while self.running:
+            try:
+                current_time = time.time()
+                
+                # Check if it's time to collect and log data
+                if current_time >= next_log_time:
+                    # Get monitoring data
+                    data = self._get_all_data()
+                    
+                    # Store latest data for UI thread (thread-safe)
+                    with self.logging_lock:
+                        self.latest_data = data
+                    
+                    # Log data to database
+                    self.logger.log_data(
+                        cpu_info=data['cpu'],
+                        memory_info=data['memory'],
+                        gpu_info=data['gpu'],
+                        npu_info=data['npu']
+                    )
+                    
+                    # Schedule next log time (prevents drift)
+                    next_log_time += self.update_interval
+                    
+                    # If we're falling behind, reset to current time
+                    if next_log_time < current_time:
+                        next_log_time = current_time + self.update_interval
+                else:
+                    # Sleep until next log time (with small buffer to avoid oversleeping)
+                    sleep_time = next_log_time - time.time() - 0.01
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+                    else:
+                        # Very close to next log time, yield CPU briefly
+                        time.sleep(0.001)
+                
+            except Exception as e:
+                # Don't crash the logging thread on errors
+                import traceback
+                print(f"\n[Background] Logging error: {e}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+                # Reset next log time on error
+                next_log_time = time.time() + self.update_interval
+    
     def run_interactive(self, export_format: Optional[str] = None, export_output: Optional[str] = None):
         """Run interactive monitoring with live updates using curses.
         
@@ -338,12 +392,28 @@ class CLIMonitor:
         utc_now = datetime.now(timezone.utc)
         self.session_start_time = utc_now.strftime('%Y-%m-%d %H:%M:%S')
         
+        # Set running flag before starting background thread
+        self.running = True
+        
+        # Pre-populate latest_data before starting background thread
+        self.latest_data = self._get_all_data()
+        
+        # Start background logging thread
+        self.logging_thread = threading.Thread(
+            target=self._background_logging_worker,
+            daemon=True
+        )
+        self.logging_thread.start()
+        
         try:
             curses.wrapper(lambda stdscr: self._run_curses(stdscr, export_format, export_output))
         except KeyboardInterrupt:
             pass
         finally:
             self.running = False
+            # Wait for logging thread to finish
+            if self.logging_thread and self.logging_thread.is_alive():
+                self.logging_thread.join(timeout=2.0)
         
         # Export on exit if requested (only this session's data)
         if export_format:
@@ -694,7 +764,7 @@ class CLIMonitor:
     
     def _run_curses(self, stdscr, export_format: Optional[str] = None, export_output: Optional[str] = None):
         """Run monitoring loop with curses for flicker-free updates."""
-        self.running = True
+        # Note: self.running is already set to True in run_interactive()
         
         # Configure curses
         curses.curs_set(0)  # Hide cursor
@@ -728,24 +798,22 @@ class CLIMonitor:
                     stdscr.clear()  # Clear after menu
                     last_update = time.time()  # Reset timer after menu
                 
-                # Check if it's time to update
+                # Get latest data from background thread (thread-safe)
+                with self.logging_lock:
+                    data = self.latest_data
+                
+                # Skip if no data available yet
+                if data is None:
+                    time.sleep(0.05)
+                    continue
+                
+                # Check if it's time to update display
                 current_time = time.time()
                 if current_time - last_update < self.update_interval:
                     time.sleep(0.05)  # Short sleep to avoid busy waiting
                     continue
                 
                 last_update = current_time
-                
-                # Get all monitoring data
-                data = self._get_all_data()
-                
-                # Log data to database
-                self.logger.log_data(
-                    cpu_info=data['cpu'],
-                    memory_info=data['memory'],
-                    gpu_info=data['gpu'],
-                    npu_info=data['npu']
-                )
                 
                 # Clear screen and draw dashboard
                 stdscr.clear()
