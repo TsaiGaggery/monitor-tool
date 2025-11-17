@@ -1,48 +1,80 @@
 # System Monitor Tool
 
-A unified Linux system monitoring dashboard for real-time CPU, GPU, NPU, memory, network, and disk I/O monitoring with frequency control.
+A unified system monitoring tool for Linux and Android devices with real-time CPU, GPU, memory, network, and disk I/O monitoring plus frequency control.
 
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
-![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)
+![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Android-lightgrey.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
 [中文說明](README_zh.md)
 
 ## Features
 
-**All-in-One Dashboard** - Single PyQt5 interface showing:
-- 📊 CPU usage, frequency, temperature (per-core)
-- 🎮 GPU monitoring (Intel/NVIDIA/AMD)
-- 🧠 NPU monitoring (Intel Meteor Lake+)
-- 💾 Memory & swap usage
-- 🌐 Network traffic & speed monitoring
-- 💿 Disk I/O & partition usage
-- ⚙️ CPU frequency & governor control
-- 📈 Real-time charts with historical data logging
+### 🖥️ **Dual Mode Support**
+- **Local Mode**: Monitor Ubuntu/Linux system
+- **Android Mode**: Remote monitor Android devices via ADB
+
+### 📊 **Comprehensive Monitoring**
+- CPU usage, frequency, temperature (per-core)
+- GPU utilization & memory (Intel i915/Xe, NVIDIA, AMD)
+- NPU monitoring (Intel Meteor Lake+)
+- Memory & swap usage
+- Network traffic & speed monitoring
+- Disk I/O & partition usage
+- Real-time charts with historical data
+
+### ⚙️ **Frequency Control**
+- CPU governor control (performance/powersave)
+- CPU frequency range adjustment
+- GPU frequency control
+- **Works on both Ubuntu and Android (requires root)**
+
+### 💾 **Data Export**
+- SQLite database logging
+- HTML report generation
+- CSV export support
 
 ## Quick Start
 
-### 1. Install
+### Local Mode (Ubuntu/Linux)
+
 ```bash
+# Install
 ./scripts/install.sh
-```
 
-The script installs all dependencies and creates a launcher.
-
-### 2. Run
-```bash
+# Run
 ./monitor-tool
 ```
 
 Or search "System Monitor Tool" in your application menu.
 
-That's it! The dashboard will open showing all monitoring data in one window.
+### Android Mode
+
+```bash
+# 1. Enable ADB on Android device and connect via WiFi/USB
+# 2. Run monitor
+python3 src/main.py --adb --ip <ANDROID_IP>
+
+# Example
+python3 src/main.py --adb --ip 192.168.1.68
+```
+
+**Requirements for Android**:
+- ADB enabled on Android device
+- Root access (su) for frequency control (optional)
 
 ## System Requirements
 
+### Local Mode
 - **OS**: Ubuntu 18.04+ or Debian-based Linux
 - **Python**: 3.8+
 - **Hardware**: Intel/NVIDIA/AMD GPU (optional), Intel NPU (Meteor Lake+, optional)
+
+### Android Mode
+- **Host**: Ubuntu/Linux with ADB installed
+- **Android**: Android x86/ARM device with ADB enabled
+- **Network**: WiFi or USB connection
+- **Root**: Required for frequency control (optional for monitoring)
 
 ## Dashboard Layout
 

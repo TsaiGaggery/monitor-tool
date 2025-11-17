@@ -241,6 +241,12 @@
         <!-- NPU Chart if available -->
         {{ npu_section }}
         
+        <!-- Network I/O Chart if available -->
+        {{ network_section }}
+        
+        <!-- Disk I/O Chart if available -->
+        {{ disk_section }}
+        
         <h2>📊 Statistics Summary</h2>
         <table>
             <thead>
@@ -422,8 +428,8 @@
         const freqDatasets = [];
         for (let i = 0; i < chartData.cpu.max_cores; i++) {
             freqDatasets.push({
-                label: `Core ${i} (Current)`,
-                data: chartData.cpu.freq_per_core.map(cores => cores[i] ? cores[i].current : 0),
+                label: `Core ${i}`,
+                data: chartData.cpu.freq_per_core.map(cores => cores[i] || 0),
                 borderColor: cpuCoreColors[i % cpuCoreColors.length],
                 backgroundColor: 'transparent',
                 borderWidth: 1.5,
@@ -455,17 +461,19 @@
         const tempColors = ['#ff6348', '#ff9ff3', '#feca57', '#48dbfb', '#1dd1a1', '#10ac84'];
         for (let i = 0; i < chartData.cpu.max_temp_sensors; i++) {
             const sensorLabel = chartData.cpu.temps[0] && chartData.cpu.temps[0][i] ? chartData.cpu.temps[0][i].label : `Sensor ${i}`;
-            // Keep Package id visible, hide individual cores by default
-            const isPackage = sensorLabel.toLowerCase().includes('package');
+            // Keep Package/CPU temps visible, hide individual cores by default
+            const isImportant = sensorLabel.toLowerCase().includes('package') || 
+                               sensorLabel.toLowerCase().includes('cpu') ||
+                               chartData.cpu.max_temp_sensors <= 2;  // Show all if only 1-2 sensors
             tempDatasets.push({
                 label: sensorLabel,
                 data: chartData.cpu.temps.map(sensors => sensors[i] ? sensors[i].current : 0),
                 borderColor: tempColors[i % tempColors.length],
                 backgroundColor: 'transparent',
-                borderWidth: isPackage ? 2.5 : 1.5,  // Thicker line for package temp
+                borderWidth: isImportant ? 2.5 : 1.5,  // Thicker line for important temps
                 tension: 0.3,
                 fill: false,
-                hidden: !isPackage  // Hide individual core temps by default, show package
+                hidden: !isImportant  // Hide individual core temps by default, show package/CPU
             });
         }
         new Chart(document.getElementById('cpuTempChart'), {
@@ -760,6 +768,88 @@
                             title: { display: true, text: 'Usage (%)', color: '#e0e0e0' },
                             min: 0,
                             max: 100
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Network I/O Chart (if available)
+        if (chartData.network && (chartData.network.upload || chartData.network.download)) {
+            new Chart(document.getElementById('networkChart'), {
+                type: 'line',
+                data: {
+                    labels: chartData.timestamps,
+                    datasets: [
+                        {
+                            label: 'Upload',
+                            data: chartData.network.upload,
+                            borderColor: '#3b82f6',
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            borderWidth: 2,
+                            tension: 0.3,
+                            fill: true
+                        },
+                        {
+                            label: 'Download',
+                            data: chartData.network.download,
+                            borderColor: '#10b981',
+                            backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                            borderWidth: 2,
+                            tension: 0.3,
+                            fill: true
+                        }
+                    ]
+                },
+                options: {
+                    ...commonOptions,
+                    scales: {
+                        ...commonOptions.scales,
+                        y: {
+                            ...commonOptions.scales.y,
+                            title: { display: true, text: 'Speed (MB/s)', color: '#e0e0e0' },
+                            min: 0
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Disk I/O Chart (if available)
+        if (chartData.disk && (chartData.disk.read || chartData.disk.write)) {
+            new Chart(document.getElementById('diskChart'), {
+                type: 'line',
+                data: {
+                    labels: chartData.timestamps,
+                    datasets: [
+                        {
+                            label: 'Read',
+                            data: chartData.disk.read,
+                            borderColor: '#f59e0b',
+                            backgroundColor: 'rgba(245, 158, 11, 0.1)',
+                            borderWidth: 2,
+                            tension: 0.3,
+                            fill: true
+                        },
+                        {
+                            label: 'Write',
+                            data: chartData.disk.write,
+                            borderColor: '#ef4444',
+                            backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                            borderWidth: 2,
+                            tension: 0.3,
+                            fill: true
+                        }
+                    ]
+                },
+                options: {
+                    ...commonOptions,
+                    scales: {
+                        ...commonOptions.scales,
+                        y: {
+                            ...commonOptions.scales.y,
+                            title: { display: true, text: 'Speed (MB/s)', color: '#e0e0e0' },
+                            min: 0
                         }
                     }
                 }

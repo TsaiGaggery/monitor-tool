@@ -27,14 +27,9 @@ class CPUMonitor:
         try:
             freq_info = psutil.cpu_freq(percpu=True)
             if freq_info:
+                # Return per_core as number array (MHz) to match Android format
                 return {
-                    'per_core': [
-                        {
-                            'current': f.current,
-                            'min': f.min,
-                            'max': f.max
-                        } for f in freq_info
-                    ],
+                    'per_core': [f.current for f in freq_info],
                     'average': sum(f.current for f in freq_info) / len(freq_info)
                 }
             else:
@@ -52,16 +47,12 @@ class CPUMonitor:
             try:
                 with open(freq_path, 'r') as f:
                     freq_khz = int(f.read().strip())
-                    frequencies.append({
-                        'current': freq_khz / 1000,  # Convert to MHz
-                        'min': 0,
-                        'max': 0
-                    })
+                    frequencies.append(freq_khz / 1000)  # Convert to MHz (number, not dict)
             except (FileNotFoundError, PermissionError):
                 continue
         
         if frequencies:
-            avg = sum(f['current'] for f in frequencies) / len(frequencies)
+            avg = sum(frequencies) / len(frequencies)
             return {'per_core': frequencies, 'average': avg}
         return {'per_core': [], 'average': 0}
     

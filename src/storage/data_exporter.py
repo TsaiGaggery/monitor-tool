@@ -4,19 +4,21 @@
 import json
 import csv
 import os
+import subprocess
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 from pathlib import Path
 
 
 class DataExporter:
     """Export monitoring data to CSV, JSON, or HTML formats."""
     
-    def __init__(self, output_dir: str = None):
+    def __init__(self, output_dir: str = None, data_source=None):
         """Initialize data exporter.
         
         Args:
             output_dir: Base directory to save exported files. Defaults to ./reports/
+            data_source: Data source for monitoring (needed for Android DB exports)
         """
         if output_dir is None:
             # Use reports directory in project root
@@ -25,6 +27,10 @@ class DataExporter:
         self.base_output_dir = Path(output_dir)
         self.session_data = []
         self.start_time = datetime.now()
+        self.data_source = data_source
+        
+        # Track session time range for Android DB exports
+        self.session_start_timestamp = int(self.start_time.timestamp())
         
         # Create date-based subdirectory (YYYY-MM-DD format)
         date_str = self.start_time.strftime('%Y-%m-%d')
@@ -39,11 +45,291 @@ class DataExporter:
         """
         self.session_data.append(data.copy())
     
-    def export_csv(self, filename: str = None) -> str:
+    def _pull_android_db_data(self) -> List[Dict]:
+        """Pull data from Android SQLite database for export.
+        
+        Returns:
+            List of processed data samples from Android DB
+        """
+        # Check if data source is Android-based
+        if self.data_source is None:
+            return []
+        
+        # Check if data source has device_ip attribute (AndroidDataSource)
+        if not hasattr(self.data_source, 'device_ip'):
+            return []
+        
+        device_id = f"{self.data_source.device_ip}:{self.data_source.port}"
+        android_db_path = "/data/local/tmp/monitor.db"
+        
+        print(f"📥 Fetching Android database records from {device_id}...")
+        
+        try:
+            # Get current timestamp for end of range
+            end_timestamp = int(datetime.now().timestamp())
+            
+            # Fetch data as JSON directly via sqlite3 (faster than pulling entire DB)
+            # Filter by session time range: from session start to now
+            # Include timestamp_ms for accurate GPU utilization calculation
+            sql_query = f"SELECT timestamp, timestamp_ms, cpu_user, cpu_nice, cpu_sys, cpu_idle, cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz, cpu_temp_millideg, mem_total_kb, mem_free_kb, mem_available_kb, gpu_freq_mhz, gpu_runtime_ms, gpu_memory_used_bytes, gpu_memory_total_bytes, net_rx_bytes, net_tx_bytes, disk_read_sectors, disk_write_sectors FROM raw_samples WHERE timestamp >= {self.session_start_timestamp} AND timestamp <= {end_timestamp} ORDER BY timestamp ASC"
+            
+            print(f"📅 Time range: {datetime.fromtimestamp(self.session_start_timestamp)} to {datetime.fromtimestamp(end_timestamp)}")
+            
+            result = subprocess.run(
+                ["adb", "-s", device_id, "shell", "su", "0", "sqlite3", "-json", android_db_path],
+                input=sql_query,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode != 0:
+                print(f"⚠️  Failed to fetch Android database records: {result.stderr}")
+                return []
+            
+            # Parse JSON output from sqlite3
+            # Handle empty result (no data in time range)
+            if not result.stdout.strip():
+                print(f"⚠️  No data found in specified time range")
+                return []
+            
+            rows = json.loads(result.stdout)
+            
+            print(f"✅ Retrieved {len(rows)} samples from Android database")
+            
+            # Process raw data into monitoring samples
+            processed_samples = []
+            prev_raw = None
+            
+            for row in rows:
+                # Reconstruct raw_data dict from database row (now a dict from JSON)
+                raw_data = {
+                    'timestamp_ms': row.get('timestamp_ms', 0),  # Millisecond timestamp for GPU calc
+                    'cpu_raw': {
+                        'user': row['cpu_user'],
+                        'nice': row['cpu_nice'],
+                        'sys': row['cpu_sys'],
+                        'idle': row['cpu_idle'],
+                        'iowait': row['cpu_iowait'],
+                        'irq': row['cpu_irq'],
+                        'softirq': row['cpu_softirq'],
+                        'steal': row['cpu_steal']
+                    },
+                    'per_core_raw': json.loads(f"[{row['per_core_raw']}]") if row['per_core_raw'] else [],
+                    'per_core_freq_khz': json.loads(f"[{row['per_core_freq_khz']}]") if row['per_core_freq_khz'] else [],
+                    'cpu_temp_millideg': row['cpu_temp_millideg'],
+                    'mem_total_kb': row['mem_total_kb'],
+                    'mem_free_kb': row['mem_free_kb'],
+                    'mem_available_kb': row['mem_available_kb'],
+                    'gpu_freq_mhz': row['gpu_freq_mhz'],
+                    'gpu_runtime_ms': row['gpu_runtime_ms'],
+                    'gpu_memory_used_bytes': row.get('gpu_memory_used_bytes', 0),
+                    'gpu_memory_total_bytes': row.get('gpu_memory_total_bytes', 0),
+                    'net_rx_bytes': row['net_rx_bytes'],
+                    'net_tx_bytes': row['net_tx_bytes'],
+                    'disk_read_sectors': row['disk_read_sectors'],
+                    'disk_write_sectors': row['disk_write_sectors']
+                }
+                
+                # Process using same logic as adb_monitor_raw.py
+                processed = self._process_android_raw_data(raw_data, prev_raw, row['timestamp'])
+                if processed:
+                    processed_samples.append(processed)
+                
+                prev_raw = raw_data
+            
+            return processed_samples
+            
+        except Exception as e:
+            print(f"⚠️  Error processing Android database: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+    
+    def _process_android_raw_data(self, raw_data: Dict, prev_raw: Optional[Dict], timestamp: int) -> Optional[Dict]:
+        """Process raw Android data into monitoring sample format.
+        
+        Args:
+            raw_data: Raw data from Android database
+            prev_raw: Previous raw data sample for delta calculations
+            timestamp: Unix timestamp
+            
+        Returns:
+            Processed monitoring sample or None if no previous data
+        """
+        if prev_raw is None:
+            return None  # Skip first sample (no delta calculation possible)
+        
+        # Calculate CPU usage
+        cpu_usage = self._calculate_cpu_usage(raw_data['cpu_raw'], prev_raw['cpu_raw'])
+        
+        # Per-core usage and freq
+        per_core_usage = []
+        per_core_freq = []
+        cpu_count = len(raw_data['per_core_raw'])
+        
+        for i in range(cpu_count):
+            prev_core = prev_raw['per_core_raw'][i] if i < len(prev_raw['per_core_raw']) else {}
+            core = raw_data['per_core_raw'][i]
+            core_usage = self._calculate_cpu_usage(core, prev_core)
+            per_core_usage.append(core_usage)
+            
+            core_freq_mhz = raw_data['per_core_freq_khz'][i] / 1000
+            per_core_freq.append(core_freq_mhz)
+        
+        avg_freq = sum(per_core_freq) / len(per_core_freq) if per_core_freq else 0
+        
+        # Memory
+        mem_total_gb = raw_data['mem_total_kb'] / 1024 / 1024
+        mem_available_gb = raw_data['mem_available_kb'] / 1024 / 1024
+        mem_free_gb = raw_data['mem_free_kb'] / 1024 / 1024
+        mem_used_gb = mem_total_gb - mem_available_gb
+        mem_percent = (mem_used_gb * 100.0 / mem_total_gb) if mem_total_gb > 0 else 0
+        
+        # GPU utilization - use ACTUAL time delta from millisecond timestamps
+        # Support both i915 (runtime) and Xe (idle_residency) drivers
+        gpu_driver = raw_data.get('gpu_driver', 'i915')  # Default to i915 for backward compatibility
+        gpu_runtime_ms = raw_data.get('gpu_runtime_ms', 0)
+        timestamp_ms = raw_data.get('timestamp_ms', 0)
+        prev_gpu_runtime_ms = prev_raw.get('gpu_runtime_ms', gpu_runtime_ms)
+        prev_timestamp_ms = prev_raw.get('timestamp_ms', timestamp_ms)
+        
+        gpu_util = 0
+        if all([gpu_runtime_ms, prev_gpu_runtime_ms, timestamp_ms, prev_timestamp_ms]):
+            runtime_delta = gpu_runtime_ms - prev_gpu_runtime_ms
+            time_delta = timestamp_ms - prev_timestamp_ms  # Actual measured time
+            
+            if time_delta > 0:
+                if gpu_driver == 'xe':
+                    # For Xe: runtime_ms is idle_residency_ms
+                    # Utilization = 100 - (idle_delta / time_delta * 100)
+                    idle_percentage = (runtime_delta / time_delta) * 100
+                    gpu_util = int(max(0, min(100, 100 - idle_percentage)))
+                else:
+                    # For i915: runtime_ms is active time
+                    gpu_util = int((runtime_delta / time_delta) * 100)
+                    gpu_util = max(0, min(100, gpu_util))
+        
+        # Network deltas
+        SECTOR_SIZE = 512
+        delta_rx = max(0, raw_data['net_rx_bytes'] - prev_raw['net_rx_bytes'])
+        delta_tx = max(0, raw_data['net_tx_bytes'] - prev_raw['net_tx_bytes'])
+        
+        # Disk deltas
+        delta_read_sectors = max(0, raw_data['disk_read_sectors'] - prev_raw['disk_read_sectors'])
+        delta_write_sectors = max(0, raw_data['disk_write_sectors'] - prev_raw['disk_write_sectors'])
+        
+        read_mb_s = (delta_read_sectors * SECTOR_SIZE) / (1024 * 1024)
+        write_mb_s = (delta_write_sectors * SECTOR_SIZE) / (1024 * 1024)
+        
+        # Construct monitoring sample (match format from main_window.py add_sample)
+        return {
+            'timestamp': datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S'),
+            'time_seconds': timestamp,
+            'cpu': {
+                'cpu_count': cpu_count,
+                'physical_count': cpu_count,
+                'usage': {
+                    'total': cpu_usage,
+                    'per_core': per_core_usage
+                },
+                'frequency': {
+                    'average': avg_freq,
+                    'per_core': per_core_freq
+                },
+                'temperature': {
+                    'Thermal': [{
+                        'label': 'CPU',
+                        'current': raw_data['cpu_temp_millideg'] / 1000.0,
+                        'high': 100.0,
+                        'critical': 105.0
+                    }]
+                } if raw_data['cpu_temp_millideg'] > 0 else {}
+            },
+            'memory': {
+                'memory': {
+                    'total': mem_total_gb,
+                    'used': mem_used_gb,
+                    'free': mem_free_gb,
+                    'available': mem_available_gb,
+                    'percent': mem_percent,
+                    'speed': 0
+                },
+                'swap': {
+                    'total': 0,
+                    'used': 0,
+                    'free': 0,
+                    'percent': 0
+                }
+            },
+            'gpu': {
+                'available': raw_data['gpu_freq_mhz'] > 0,
+                'gpus': [{
+                    'name': 'Android GPU',
+                    'gpu_clock': raw_data['gpu_freq_mhz'],
+                    'clock_graphics': raw_data['gpu_freq_mhz'],
+                    'gpu_util': gpu_util,
+                    'memory_used': raw_data.get('gpu_memory_used_bytes', 0) // (1024 * 1024),  # From i915_gem_objects or xe fdinfo
+                    'memory_total': raw_data.get('gpu_memory_total_bytes', 0) // (1024 * 1024),  # From i915_gem_objects or xe fdinfo
+                    'memory_util': round((raw_data.get('gpu_memory_used_bytes', 0) / raw_data.get('gpu_memory_total_bytes', 1)) * 100, 1) if raw_data.get('gpu_memory_total_bytes', 0) > 0 else 0,  # Keep one decimal place
+                    'temperature': 0
+                }] if raw_data['gpu_freq_mhz'] > 0 else []
+            },
+            'network': {
+                'upload_speed': delta_tx,
+                'download_speed': delta_rx,
+                'interfaces': [],
+                'interface_stats': {},
+                'io_stats': {
+                    'upload_speed': delta_tx,
+                    'download_speed': delta_rx,
+                    'packets_sent': 0,
+                    'packets_recv': 0
+                },
+                'connections': {'total': 0, 'tcp_established': 0}
+            },
+            'disk': {
+                'read_speed_mb': read_mb_s,
+                'write_speed_mb': write_mb_s,
+                'partitions': {},
+                'disks': [],
+                'io_stats': {
+                    'read_speed': read_mb_s * 1024 * 1024,
+                    'write_speed': write_mb_s * 1024 * 1024,
+                    'read_speed_mb': read_mb_s,
+                    'write_speed_mb': write_mb_s,
+                    'read_iops': delta_read_sectors,
+                    'write_iops': delta_write_sectors
+                },
+                'partition_usage': []
+            }
+        }
+    
+    def _calculate_cpu_usage(self, curr, prev):
+        """Calculate CPU usage from raw /proc/stat values."""
+        if not prev:
+            return 0.0
+        
+        d_user = curr['user'] - prev['user']
+        d_nice = curr['nice'] - prev['nice']
+        d_sys = curr['sys'] - prev['sys']
+        d_idle = curr['idle'] - prev['idle']
+        d_iowait = curr['iowait'] - prev['iowait']
+        d_irq = curr['irq'] - prev['irq']
+        d_softirq = curr['softirq'] - prev['softirq']
+        d_steal = curr['steal'] - prev['steal']
+        
+        d_total = d_user + d_nice + d_sys + d_idle + d_iowait + d_irq + d_softirq + d_steal
+        d_active = d_total - d_idle - d_iowait
+        
+        return (d_active * 100.0 / d_total) if d_total > 0 else 0.0
+    
+    def export_csv(self, filename: str = None, use_android_db: bool = True) -> str:
         """Export session data to CSV format.
         
         Args:
             filename: Output filename. Auto-generated if None.
+            use_android_db: If True and data source is Android, pull from Android DB
             
         Returns:
             Path to the exported file
@@ -54,12 +340,20 @@ class DataExporter:
         
         filepath = self.output_dir / filename
         
-        if not self.session_data:
+        # Use Android DB if available and requested
+        export_data = self.session_data
+        if use_android_db:
+            android_data = self._pull_android_db_data()
+            if android_data:
+                export_data = android_data
+                print(f"📊 Exporting {len(export_data)} samples from Android database")
+        
+        if not export_data:
             raise ValueError("No data to export")
         
         # Extract all unique keys from all samples
         all_keys = set()
-        for sample in self.session_data:
+        for sample in export_data:
             all_keys.update(self._flatten_dict(sample).keys())
         
         all_keys = sorted(all_keys)
@@ -68,17 +362,18 @@ class DataExporter:
             writer = csv.DictWriter(csvfile, fieldnames=all_keys)
             writer.writeheader()
             
-            for sample in self.session_data:
+            for sample in export_data:
                 flat_data = self._flatten_dict(sample)
                 writer.writerow(flat_data)
         
         return str(filepath)
     
-    def export_json(self, filename: str = None) -> str:
+    def export_json(self, filename: str = None, use_android_db: bool = True) -> str:
         """Export session data to JSON format.
         
         Args:
             filename: Output filename. Auto-generated if None.
+            use_android_db: If True and data source is Android, pull from Android DB
             
         Returns:
             Path to the exported file
@@ -89,16 +384,24 @@ class DataExporter:
         
         filepath = self.output_dir / filename
         
-        if not self.session_data:
+        # Use Android DB if available and requested
+        export_samples = self.session_data
+        if use_android_db:
+            android_data = self._pull_android_db_data()
+            if android_data:
+                export_samples = android_data
+                print(f"📊 Exporting {len(export_samples)} samples from Android database")
+        
+        if not export_samples:
             raise ValueError("No data to export")
         
         export_data = {
             'session_info': {
                 'start_time': self.start_time.isoformat(),
                 'end_time': datetime.now().isoformat(),
-                'sample_count': len(self.session_data)
+                'sample_count': len(export_samples)
             },
-            'data': self.session_data
+            'data': export_samples
         }
         
         with open(filepath, 'w') as jsonfile:
@@ -106,11 +409,12 @@ class DataExporter:
         
         return str(filepath)
     
-    def export_html(self, filename: str = None) -> str:
+    def export_html(self, filename: str = None, use_android_db: bool = True) -> str:
         """Export session data to HTML report format.
         
         Args:
             filename: Output filename. Auto-generated if None.
+            use_android_db: If True and data source is Android, pull from Android DB
             
         Returns:
             Path to the exported file
@@ -121,13 +425,28 @@ class DataExporter:
         
         filepath = self.output_dir / filename
         
-        if not self.session_data:
+        # Use Android DB if available and requested
+        export_samples = self.session_data
+        if use_android_db:
+            android_data = self._pull_android_db_data()
+            if android_data:
+                export_samples = android_data
+                print(f"📊 Exporting {len(export_samples)} samples from Android database")
+        
+        if not export_samples:
             raise ValueError("No data to export")
+        
+        # Temporarily replace session_data for statistics calculation
+        original_session_data = self.session_data
+        self.session_data = export_samples
         
         # Calculate statistics
         stats = self._calculate_statistics()
         
         html_content = self._generate_html_report(stats)
+        
+        # Restore original session_data
+        self.session_data = original_session_data
         
         with open(filepath, 'w') as htmlfile:
             htmlfile.write(html_content)
@@ -245,6 +564,14 @@ class DataExporter:
         # NPU data arrays
         npu_usage = []
         
+        # Network data arrays
+        network_upload = []
+        network_download = []
+        
+        # Disk data arrays
+        disk_read = []
+        disk_write = []
+        
         # Track max cores/temps for consistent array sizes
         max_cpu_cores = 0
         max_temp_sensors = 0
@@ -290,7 +617,8 @@ class DataExporter:
                     # CPU temperature
                     temp = cpu_data.get('temperature', {})
                     if isinstance(temp, dict):
-                        coretemp = temp.get('coretemp', [])
+                        # Try both 'coretemp' (local) and 'Thermal' (Android)
+                        coretemp = temp.get('coretemp', []) or temp.get('Thermal', [])
                         if coretemp:
                             max_temp_sensors = max(max_temp_sensors, len(coretemp))
                             # Keep full sensor info (label + current)
@@ -352,6 +680,44 @@ class DataExporter:
                 npu_data = sample['npu']
                 if isinstance(npu_data, dict):
                     npu_usage.append(npu_data.get('utilization', 0))
+            
+            # Network data extraction
+            if 'network' in sample:
+                net_data = sample['network']
+                if isinstance(net_data, dict):
+                    # Try io_stats first, then top-level
+                    io_stats = net_data.get('io_stats', {})
+                    if io_stats:
+                        network_upload.append(io_stats.get('upload_speed', 0) / (1024 * 1024))  # MB/s
+                        network_download.append(io_stats.get('download_speed', 0) / (1024 * 1024))  # MB/s
+                    else:
+                        network_upload.append(net_data.get('upload_speed', 0) / (1024 * 1024))  # MB/s
+                        network_download.append(net_data.get('download_speed', 0) / (1024 * 1024))  # MB/s
+                else:
+                    network_upload.append(0)
+                    network_download.append(0)
+            else:
+                network_upload.append(0)
+                network_download.append(0)
+            
+            # Disk data extraction
+            if 'disk' in sample:
+                disk_data = sample['disk']
+                if isinstance(disk_data, dict):
+                    # Try io_stats first
+                    io_stats = disk_data.get('io_stats', {})
+                    if io_stats:
+                        disk_read.append(io_stats.get('read_speed_mb', 0))  # MB/s
+                        disk_write.append(io_stats.get('write_speed_mb', 0))  # MB/s
+                    else:
+                        disk_read.append(disk_data.get('read_speed_mb', 0))  # MB/s
+                        disk_write.append(disk_data.get('write_speed_mb', 0))  # MB/s
+                else:
+                    disk_read.append(0)
+                    disk_write.append(0)
+            else:
+                disk_read.append(0)
+                disk_write.append(0)
         
         # Convert to JSON for JavaScript
         import json
@@ -380,6 +746,14 @@ class DataExporter:
                 'available': memory_available,
                 'swap_percent': swap_percent
             },
+            'network': {
+                'upload': network_upload,
+                'download': network_download
+            },
+            'disk': {
+                'read': disk_read,
+                'write': disk_write
+            },
             'npu': {
                 'usage': npu_usage
             }
@@ -392,6 +766,28 @@ class DataExporter:
         npu_section = ''
         if npu_usage and any(npu_usage):
             npu_section = '<h3 style="color: #14ffec; margin-top: 30px;">🤖 NPU Metrics</h3><div class="chart-container"><div class="chart-title">NPU Usage (%)</div><canvas id="npuUsageChart"></canvas></div>'
+        
+        # Generate Network section if data exists
+        network_section = ''
+        if network_upload or network_download:
+            network_section = '''
+            <h3 style="color: #3b82f6; margin-top: 30px;">🌐 Network I/O</h3>
+            <div class="chart-container">
+                <div class="chart-title">Network Speed (MB/s)</div>
+                <canvas id="networkChart"></canvas>
+            </div>
+            '''
+        
+        # Generate Disk section if data exists
+        disk_section = ''
+        if disk_read or disk_write:
+            disk_section = '''
+            <h3 style="color: #f59e0b; margin-top: 30px;">💿 Disk I/O</h3>
+            <div class="chart-container">
+                <div class="chart-title">Disk Speed (MB/s)</div>
+                <canvas id="diskChart"></canvas>
+            </div>
+            '''
         
         # Generate statistics table rows
         stats_rows = ''
@@ -420,6 +816,8 @@ class DataExporter:
         html = html.replace('{{ data_points }}', str(len(self.session_data)))
         html = html.replace('{{ chart_data_json }}', json.dumps(chart_data).replace("'", "\\'"))
         html = html.replace('{{ npu_section }}', npu_section)
+        html = html.replace('{{ network_section }}', network_section)
+        html = html.replace('{{ disk_section }}', disk_section)
         html = html.replace('{{ stats_rows }}', stats_rows)
         html = html.replace('{{ report_time }}', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         
