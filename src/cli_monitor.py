@@ -24,18 +24,19 @@ from typing import Dict, List, Optional
 # Add src directory to Python path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from monitors import CPUMonitor, MemoryMonitor, GPUMonitor, NPUMonitor, NetworkMonitor, DiskMonitor
+from data_source import MonitorDataSource, LocalDataSource, AndroidDataSource
 from storage import DataLogger, DataExporter
-from controllers import FrequencyController
+from controllers import FrequencyController, ADBFrequencyController
 
 
 class CLIMonitor:
     """CLI-based system monitor without GUI."""
     
-    def __init__(self, update_interval: float = 1.0, enable_logging: bool = False):
+    def __init__(self, data_source: MonitorDataSource = None, update_interval: float = 1.0, enable_logging: bool = False):
         """Initialize CLI monitor.
         
         Args:
+            data_source: Data source for monitoring (defaults to LocalDataSource)
             update_interval: Update interval in seconds
             enable_logging: Enable SQLite logging (deprecated, always enabled)
         """
@@ -46,22 +47,48 @@ class CLIMonitor:
         # Get terminal size
         self.term_width, self.term_height = shutil.get_terminal_size((80, 24))
         
-        # Initialize monitors
-        self.cpu_monitor = CPUMonitor()
-        self.memory_monitor = MemoryMonitor()
-        self.gpu_monitor = GPUMonitor()
-        self.npu_monitor = NPUMonitor()
-        self.network_monitor = NetworkMonitor()
-        self.disk_monitor = DiskMonitor()
+        # Initialize data source
+        if data_source is None:
+            self.data_source = LocalDataSource()
+        else:
+            self.data_source = data_source
         
-        # Initialize frequency controller
-        self.freq_controller = FrequencyController()
+        # Connect to data source
+        if not self.data_source.is_connected():
+            self.data_source.connect()
         
-        # Always initialize logger (like GUI does)
-        self.logger = DataLogger()
+        # Initialize frequency controller based on data source
+        if isinstance(self.data_source, LocalDataSource):
+            # Local Ubuntu system
+            self.freq_controller = FrequencyController()
+        elif isinstance(self.data_source, AndroidDataSource):
+            # Android device via ADB
+            device_id = f"{self.data_source.device_ip}:{self.data_source.port}"
+            adb_freq_ctrl = ADBFrequencyController(device_id)
+            
+            # Only use if available (has root + script working)
+            if adb_freq_ctrl.is_available:
+                self.freq_controller = adb_freq_ctrl
+                print(f"✅ Android frequency control enabled")
+            else:
+                self.freq_controller = None
+                print(f"⚠️  Android frequency control disabled (requires root)")
+        else:
+            self.freq_controller = None
+        
+        # Initialize storage
+        # Only use local database for LocalDataSource
+        # Android data is stored on Android device, not locally
+        if isinstance(self.data_source, LocalDataSource):
+            self.logger = DataLogger()
+        else:
+            self.logger = None  # Android mode - no local logging
         
         # Track session start time for export
         self.session_start_time = None
+        
+        # Session data exporter (for Android mode export)
+        self.data_exporter = DataExporter(data_source=self.data_source) if not isinstance(self.data_source, LocalDataSource) else None
         
         # Background logging thread
         self.logging_thread = None
@@ -99,12 +126,12 @@ class CLIMonitor:
         """Get all monitoring data."""
         return {
             'timestamp': datetime.now().isoformat(),
-            'cpu': self.cpu_monitor.get_all_info(),
-            'memory': self.memory_monitor.get_all_info(),
-            'gpu': self.gpu_monitor.get_all_info(),
-            'npu': self.npu_monitor.get_all_info(),
-            'network': self.network_monitor.get_all_info(),
-            'disk': self.disk_monitor.get_all_info(),
+            'cpu': self.data_source.get_cpu_info(),
+            'memory': self.data_source.get_memory_info(),
+            'gpu': self.data_source.get_gpu_info(),
+            'npu': self.data_source.get_npu_info(),
+            'network': self.data_source.get_network_info(),
+            'disk': self.data_source.get_disk_info(),
         }
         
     def display_once(self, format: str = 'text', output_file: Optional[str] = None):
@@ -334,6 +361,8 @@ class CLIMonitor:
     def _background_logging_worker(self):
         """Background thread worker for continuous data logging."""
         next_log_time = time.time()
+        logging_start_time = time.time()  # Track when logging actually started (PC time)
+        android_start_timestamp_ms = None  # Track Android device start time (for ADB mode)
         
         while self.running:
             try:
@@ -348,13 +377,40 @@ class CLIMonitor:
                     with self.logging_lock:
                         self.latest_data = data
                     
-                    # Log data to database
-                    self.logger.log_data(
-                        cpu_info=data['cpu'],
-                        memory_info=data['memory'],
-                        gpu_info=data['gpu'],
-                        npu_info=data['npu']
-                    )
+                    # Log data to database (only for local monitoring)
+                    if self.logger:
+                        self.logger.log_data(
+                            cpu_info=data['cpu'],
+                            memory_info=data['memory'],
+                            gpu_info=data['gpu'],
+                            npu_info=data['npu']
+                        )
+                    
+                    # Add to session exporter (for Android mode export)
+                    if self.data_exporter:
+                        # Get time_seconds (use Android timestamp for ADB, PC time for local)
+                        if hasattr(self.data_source, 'get_timestamp_ms'):
+                            # Android mode: use device timestamp
+                            android_timestamp_ms = self.data_source.get_timestamp_ms()
+                            if android_start_timestamp_ms is None:
+                                android_start_timestamp_ms = android_timestamp_ms
+                            time_seconds = (android_timestamp_ms - android_start_timestamp_ms) / 1000.0
+                        else:
+                            # Local mode: use PC time
+                            time_seconds = current_time - logging_start_time
+                        
+                        export_data = {
+                            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(current_time)),
+                            'time_seconds': time_seconds,
+                            'cpu': data['cpu'],
+                            'memory': data['memory'],
+                            'gpu': data['gpu'],
+                            'network': data['network'],
+                            'disk': data['disk']
+                        }
+                        if data['npu'].get('available', False):
+                            export_data['npu'] = data['npu']
+                        self.data_exporter.add_sample(export_data)
                     
                     # Schedule next log time (prevents drift)
                     next_log_time += self.update_interval
@@ -391,6 +447,10 @@ class CLIMonitor:
         # SQLite CURRENT_TIMESTAMP is UTC, so we need to store UTC time for comparison
         utc_now = datetime.now(timezone.utc)
         self.session_start_time = utc_now.strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Update data exporter start time (for Android mode)
+        if self.data_exporter:
+            self.data_exporter.start_time = datetime.now()
         
         # Set running flag before starting background thread
         self.running = True
@@ -848,7 +908,27 @@ class CLIMonitor:
         """
         # For HTML export, we need to use the session-based DataExporter
         if format == 'html':
-            # Load data from database and export
+            # Check if local database exists (only for LocalDataSource)
+            if not self.logger:
+                # Android mode - use session data collected during monitoring
+                if not self.data_exporter or not self.data_exporter.session_data:
+                    print(f"❌ No monitoring data to export")
+                    return
+                
+                if not output_file:
+                    from datetime import datetime
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    output_file = f"android_report_{timestamp}.html"
+                
+                # Export using collected session data (use_android_db=False to skip DB pull)
+                success = self.data_exporter.export_html(output_file, use_android_db=False)
+                if success:
+                    print(f"✓ HTML report exported to {output_file}")
+                else:
+                    print(f"❌ Export failed")
+                return
+            
+            # Local mode - load data from local database and export
             try:
                 import sqlite3
                 conn = sqlite3.connect(self.logger.db_path)
@@ -880,7 +960,7 @@ class CLIMonitor:
                     return
                 
                 # Create exporter and add samples
-                exporter = DataExporter()
+                exporter = DataExporter(data_source=self.data_source)
                 first_timestamp = None  # Renamed to avoid conflict with parameter
                 
                 for i, row in enumerate(rows):
@@ -937,7 +1017,12 @@ class CLIMonitor:
                 return
         
         # For CSV/JSON, use the database exporter
-        exporter = DataExporter(self.logger.db_path)
+        if not self.logger:
+            print(f"❌ CSV/JSON export not available for Android monitoring")
+            print(f"   Use HTML export instead: --export-format html")
+            return
+        
+        exporter = DataExporter(db_path=self.logger.db_path, data_source=self.data_source)
         
         if not output_file:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -962,11 +1047,20 @@ Examples:
   # Interactive dashboard (like htop)
   %(prog)s
   
+  # Monitor Android device via ADB
+  %(prog)s --adb --ip 192.168.1.68
+  
+  # Monitor Android device with custom port
+  %(prog)s --adb --ip 172.25.65.75 --port 5555
+  
   # With faster updates
   %(prog)s --interval 0.5
   
   # Run and export HTML when you press 'q' to exit
   %(prog)s --export-format html --output report.html
+  
+  # Android monitoring with export on exit
+  %(prog)s --adb --ip 192.168.1.68 --export-format html
   
   # Run and export CSV on exit
   %(prog)s -e csv
@@ -986,6 +1080,26 @@ Note: Logging is always enabled. Use --export-format to auto-export when you qui
         type=float,
         default=1.0,
         help='Update interval in seconds (default: 1.0)'
+    )
+    
+    parser.add_argument(
+        '--adb',
+        action='store_true',
+        help='Monitor Android device via ADB'
+    )
+    
+    parser.add_argument(
+        '--ip',
+        type=str,
+        default='192.168.1.68',
+        help='Android device IP address (default: 192.168.1.68)'
+    )
+    
+    parser.add_argument(
+        '--port',
+        type=int,
+        default=5555,
+        help='ADB port (default: 5555)'
     )
     
     parser.add_argument(
@@ -1027,8 +1141,16 @@ Note: Logging is always enabled. Use --export-format to auto-export when you qui
     
     args = parser.parse_args()
     
+    # Create data source based on mode
+    if args.adb:
+        print(f"🤖 Android Monitor Mode")
+        print(f"📱 Device: {args.ip}:{args.port}")
+        data_source = AndroidDataSource(args.ip, args.port)
+    else:
+        data_source = LocalDataSource()
+    
     # Create monitor instance (logging always enabled)
-    monitor = CLIMonitor(update_interval=args.interval)
+    monitor = CLIMonitor(data_source=data_source, update_interval=args.interval)
     
     try:
         if args.once:

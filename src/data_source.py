@@ -283,6 +283,12 @@ class AndroidDataSource(MonitorDataSource):
             'partition_usage': partitions_list
         }
     
+    def get_timestamp_ms(self) -> int:
+        """Get Android device timestamp in milliseconds."""
+        if not self.is_connected():
+            return 0
+        return self.adb_monitor.get_timestamp_ms()
+    
     def get_source_name(self) -> str:
         """Get data source name."""
         return f"Android Device ({self.device_ip}:{self.port})"
