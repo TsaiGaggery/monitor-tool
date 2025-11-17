@@ -117,9 +117,13 @@
 </head>
 <body>
     <div class="container">
-        <h1>📊 System Monitoring Report</h1>
+        <h1>📊 System Monitoring Report - {{ source_name }}</h1>
         
         <div class="summary">
+            <div class="summary-item">
+                <div class="summary-label">Data Source</div>
+                <div class="summary-value">{{ source_name }}</div>
+            </div>
             <div class="summary-item">
                 <div class="summary-label">Start Time</div>
                 <div class="summary-value">{{ start_time }}</div>

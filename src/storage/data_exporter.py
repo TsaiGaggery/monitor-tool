@@ -5,7 +5,7 @@ import json
 import csv
 import os
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from pathlib import Path
 
@@ -13,12 +13,13 @@ from pathlib import Path
 class DataExporter:
     """Export monitoring data to CSV, JSON, or HTML formats."""
     
-    def __init__(self, output_dir: str = None, data_source=None):
+    def __init__(self, output_dir: str = None, data_source=None, session_start_time: datetime = None):
         """Initialize data exporter.
         
         Args:
             output_dir: Base directory to save exported files. Defaults to ./reports/
             data_source: Data source for monitoring (needed for Android DB exports)
+            session_start_time: Session start time (defaults to now)
         """
         if output_dir is None:
             # Use reports directory in project root
@@ -26,7 +27,7 @@ class DataExporter:
         
         self.base_output_dir = Path(output_dir)
         self.session_data = []
-        self.start_time = datetime.now()
+        self.start_time = session_start_time if session_start_time else datetime.now()
         self.data_source = data_source
         
         # Track session time range for Android DB exports
@@ -70,14 +71,17 @@ class DataExporter:
             
             # Fetch data as JSON directly via sqlite3 (faster than pulling entire DB)
             # Filter by session time range: from session start to now
-            # Include timestamp_ms for accurate GPU utilization calculation
-            sql_query = f"SELECT timestamp, timestamp_ms, cpu_user, cpu_nice, cpu_sys, cpu_idle, cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz, cpu_temp_millideg, mem_total_kb, mem_free_kb, mem_available_kb, gpu_freq_mhz, gpu_runtime_ms, gpu_memory_used_bytes, gpu_memory_total_bytes, net_rx_bytes, net_tx_bytes, disk_read_sectors, disk_write_sectors FROM raw_samples WHERE timestamp >= {self.session_start_timestamp} AND timestamp <= {end_timestamp} ORDER BY timestamp ASC"
+            # Note: Put SQL directly in command args (stdin doesn't work through adb shell su)
+            # Test with simple query first
+            sql_query = f"SELECT * FROM raw_samples WHERE timestamp >= {self.session_start_timestamp} AND timestamp <= {end_timestamp} ORDER BY timestamp ASC"
             
             print(f"📅 Time range: {datetime.fromtimestamp(self.session_start_timestamp)} to {datetime.fromtimestamp(end_timestamp)}")
             
+            # Build command
+            cmd = ["adb", "-s", device_id, "shell", f"su 0 sqlite3 -json {android_db_path} '{sql_query}'"]
+            
             result = subprocess.run(
-                ["adb", "-s", device_id, "shell", "su", "0", "sqlite3", "-json", android_db_path],
-                input=sql_query,
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=30
@@ -421,7 +425,12 @@ class DataExporter:
         """
         if filename is None:
             timestamp = self.start_time.strftime('%Y%m%d_%H%M%S')
-            filename = f'monitoring_report_{timestamp}.html'
+            # Include source information in filename
+            if self.data_source:
+                source_name = self.data_source.get_source_name().replace(' ', '_').replace('(', '').replace(')', '').replace(':', '_')
+                filename = f'monitoring_report_{source_name}_{timestamp}.html'
+            else:
+                filename = f'monitoring_report_{timestamp}.html'
         
         filepath = self.output_dir / filename
         
@@ -521,17 +530,25 @@ class DataExporter:
         # Calculate duration from actual data timestamps
         if self.session_data and len(self.session_data) >= 2:
             try:
-                # Parse first and last timestamps
-                first_ts = self.session_data[0].get('timestamp', '')
-                last_ts = self.session_data[-1].get('timestamp', '')
+                # Use time_seconds if available (more accurate)
+                first_time_sec = self.session_data[0].get('time_seconds')
+                last_time_sec = self.session_data[-1].get('time_seconds')
                 
-                if first_ts and last_ts:
-                    # Try to parse timestamps
-                    first_time = datetime.strptime(first_ts, '%Y-%m-%d %H:%M:%S')
-                    last_time = datetime.strptime(last_ts, '%Y-%m-%d %H:%M:%S')
-                    duration = last_time - first_time
+                if first_time_sec is not None and last_time_sec is not None:
+                    # Calculate duration from time_seconds (actual elapsed time)
+                    duration_seconds = last_time_sec - first_time_sec
+                    duration = timedelta(seconds=duration_seconds)
                 else:
-                    duration = datetime.now() - self.start_time
+                    # Fallback: parse timestamp strings
+                    first_ts = self.session_data[0].get('timestamp', '')
+                    last_ts = self.session_data[-1].get('timestamp', '')
+                    
+                    if first_ts and last_ts:
+                        first_time = datetime.strptime(first_ts, '%Y-%m-%d %H:%M:%S')
+                        last_time = datetime.strptime(last_ts, '%Y-%m-%d %H:%M:%S')
+                        duration = last_time - first_time
+                    else:
+                        duration = datetime.now() - self.start_time
             except:
                 duration = datetime.now() - self.start_time
         else:
@@ -810,10 +827,14 @@ class DataExporter:
         except FileNotFoundError:
             raise FileNotFoundError(f"Template not found at {template_path}")
         
+        # Get source name for the report
+        source_name = self.data_source.get_source_name() if self.data_source else "Local System"
+        
         # Replace template variables
         html = template.replace('{{ start_time }}', self.start_time.strftime('%Y-%m-%d %H:%M:%S'))
         html = html.replace('{{ duration }}', str(duration))
         html = html.replace('{{ data_points }}', str(len(self.session_data)))
+        html = html.replace('{{ source_name }}', source_name)
         html = html.replace('{{ chart_data_json }}', json.dumps(chart_data).replace("'", "\\'"))
         html = html.replace('{{ npu_section }}', npu_section)
         html = html.replace('{{ network_section }}', network_section)

@@ -67,7 +67,13 @@ class MainWindow(QMainWindow):
             self.freq_controller = None
         
         # Initialize storage
-        self.data_logger = DataLogger()
+        # Only use local database for LocalDataSource
+        # Android data is stored on Android device, not locally
+        if isinstance(self.data_source, LocalDataSource):
+            self.data_logger = DataLogger()
+        else:
+            self.data_logger = None  # Android mode - no local logging
+        
         self.data_exporter = DataExporter(data_source=self.data_source)
         
         # Timing
@@ -654,9 +660,10 @@ class MainWindow(QMainWindow):
         self.network_speed_plot.update_data(upload_speed_kb, download_speed_kb, current_time)
         self.disk_io_plot.update_data(read_speed_mb, write_speed_mb, current_time)
         
-        # Log data to database
-        self.data_logger.log_data(cpu_info, memory_info, gpu_info, 
-                                  npu_info if npu_info.get('available', False) else None)
+        # Log data to database (only for local monitoring)
+        if self.data_logger:
+            self.data_logger.log_data(cpu_info, memory_info, gpu_info, 
+                                      npu_info if npu_info.get('available', False) else None)
         
         # Add data to exporter
         export_data = {
@@ -706,6 +713,12 @@ class MainWindow(QMainWindow):
     
     def cleanup_data(self):
         """Cleanup old monitoring data."""
+        if not self.data_logger:
+            QMessageBox.warning(self, 'Not Available', 
+                              'Cleanup is only available for local monitoring.\n'
+                              'Android data is stored on the device.')
+            return
+        
         reply = QMessageBox.question(self, 'Cleanup Data',
                                     'Remove data older than 7 days?',
                                     QMessageBox.Yes | QMessageBox.No,
@@ -722,10 +735,10 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, 'No Data', 'No monitoring data to export')
                 return
             
-            # Export to all formats
-            csv_path = self.data_exporter.export_csv()
-            json_path = self.data_exporter.export_json()
-            html_path = self.data_exporter.export_html()
+            # Export to all formats (use session_data, don't pull from Android DB)
+            csv_path = self.data_exporter.export_csv(use_android_db=False)
+            json_path = self.data_exporter.export_json(use_android_db=False)
+            html_path = self.data_exporter.export_html(use_android_db=False)
             
             # Show success message with all paths
             QMessageBox.information(self, 'Export Successful', 
@@ -772,7 +785,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, 'No Data', 'No monitoring data to export')
                 return
             
-            filepath = self.data_exporter.export_html()
+            # Use session_data directly, don't pull from Android DB (use_android_db=False)
+            filepath = self.data_exporter.export_html(use_android_db=False)
             QMessageBox.information(self, 'Export Successful', 
                                    f'Report generated:\n{filepath}\n\n'
                                    f'Samples: {len(self.data_exporter.session_data)}')
@@ -804,7 +818,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Handle window close event."""
         self.update_timer.stop()
-        self.data_logger.close()
+        # Only close logger if it exists (None in Android mode)
+        if self.data_logger:
+            self.data_logger.close()
         event.accept()
 
 

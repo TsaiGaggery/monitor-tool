@@ -294,6 +294,7 @@ class ADBMonitorRaw:
             }
             
             # Save for next delta calculation
+            self._latest_raw_data = raw_data
             self._previous_raw_data = raw_data
     
     def _stream_worker(self):
@@ -439,6 +440,11 @@ class ADBMonitorRaw:
         """Get disk information."""
         with self._data_lock:
             return self._disk_info.copy()
+    
+    def get_timestamp_ms(self) -> int:
+        """Get Android device timestamp in milliseconds."""
+        with self._data_lock:
+            return self._latest_raw_data.get('timestamp_ms', 0)
     
     def _empty_cpu_info(self) -> Dict:
         return {
