@@ -17,6 +17,14 @@ class GPUMonitor:
         self.amd_available = self.gpu_type == 'amd'
         self.intel_available = self.gpu_type == 'intel'
         
+        # Previous sample for delta calculation (Intel i915 GPU)
+        self._prev_intel_runtime_ms = None
+        self._prev_intel_timestamp = None
+        
+        # Previous sample for delta calculation (Intel Xe GPU)
+        self._prev_xe_idle_ms = None
+        self._prev_xe_timestamp = None
+        
         if self.nvidia_available:
             try:
                 import pynvml
@@ -117,10 +125,10 @@ class GPUMonitor:
         return False
     
     def _get_intel_gpu_utilization_from_debugfs(self) -> Optional[float]:
-        """Calculate Intel GPU utilization by reading i915_engine_info twice.
+        """Calculate Intel GPU utilization from i915_engine_info Runtime.
         
-        This reads /sys/kernel/debug/dri/*/i915_engine_info to get runtime statistics,
-        samples twice with a small interval, and calculates the busy percentage.
+        This reads /sys/kernel/debug/dri/*/i915_engine_info once per sample,
+        and calculates utilization based on the delta from the previous sample.
         Requires sudo access to /sys/kernel/debug.
         
         Returns:
@@ -154,11 +162,9 @@ class GPUMonitor:
         
         try:
             # Find i915_engine_info file by trying to read it with sudo
-            # We can't use os.path.exists() because /sys/kernel/debug requires root
             engine_info_path = None
             for variant in ['0000:00:02.0', '1', '128', '0']:
                 path = f'/sys/kernel/debug/dri/{variant}/i915_engine_info'
-                # Try to read it to check if it exists
                 test_result = subprocess.run(['sudo', '-n', 'cat', path],
                                            capture_output=True, text=True, timeout=1)
                 if test_result.returncode == 0:
@@ -168,36 +174,32 @@ class GPUMonitor:
             if not engine_info_path:
                 return None
             
-            # First sample
-            result1 = subprocess.run(['sudo', '-n', 'cat', engine_info_path],
+            # Read current sample
+            result = subprocess.run(['sudo', '-n', 'cat', engine_info_path],
                                    capture_output=True, text=True, timeout=1)
-            if result1.returncode != 0:
+            if result.returncode != 0:
                 return None
             
-            time1 = time.time()
-            runtime1 = parse_engine_runtime(result1.stdout)
+            current_time = time.time()
+            current_runtime = parse_engine_runtime(result.stdout)
             
-            if runtime1 is None:
+            if current_runtime is None:
                 return None
             
-            # Wait 100ms for measurable difference
-            time.sleep(0.1)
+            # Need previous sample to calculate delta
+            if self._prev_intel_runtime_ms is None or self._prev_intel_timestamp is None:
+                # First sample - save and return 0
+                self._prev_intel_runtime_ms = current_runtime
+                self._prev_intel_timestamp = current_time
+                return 0.0
             
-            # Second sample
-            result2 = subprocess.run(['sudo', '-n', 'cat', engine_info_path],
-                                   capture_output=True, text=True, timeout=1)
-            if result2.returncode != 0:
-                return None
+            # Calculate utilization from delta
+            time_delta = (current_time - self._prev_intel_timestamp) * 1000  # Convert to ms
+            runtime_delta = current_runtime - self._prev_intel_runtime_ms  # Already in ms
             
-            time2 = time.time()
-            runtime2 = parse_engine_runtime(result2.stdout)
-            
-            if runtime2 is None:
-                return None
-            
-            # Calculate utilization
-            time_delta = (time2 - time1) * 1000  # Convert to ms
-            runtime_delta = runtime2 - runtime1  # Already in ms
+            # Save current values for next calculation
+            self._prev_intel_runtime_ms = current_runtime
+            self._prev_intel_timestamp = current_time
             
             if time_delta <= 0:
                 return None
@@ -256,10 +258,13 @@ class GPUMonitor:
             return None
     
     def _get_xe_gpu_utilization(self, card_num: int = 0) -> Optional[float]:
-        """Calculate Xe GPU utilization using idle residency.
+        """Calculate Xe GPU utilization using idle residency (delta-based).
         
-        For Xe driver, we calculate utilization from gt-c6 idle time:
+        For Xe driver, we calculate utilization from gt-c6 idle time delta:
         utilization = 100 - (idle_time_delta / total_time_delta * 100)
+        
+        This method uses delta calculation between samples, similar to i915 approach.
+        No sleep() calls - uses actual time between samples.
         
         Args:
             card_num: DRM card number (e.g., 0 for card0)
@@ -275,29 +280,32 @@ class GPUMonitor:
             if not os.path.exists(idle_path):
                 return None
             
-            # First sample
+            # Read current idle time
             with open(idle_path, 'r') as f:
-                idle_ms1 = int(f.read().strip())
-            time1 = time.time()
+                current_idle_ms = int(f.read().strip())
+            current_time = time.time()
             
-            # Wait 100ms
-            time.sleep(0.1)
+            # Need previous sample to calculate delta
+            if self._prev_xe_idle_ms is None or self._prev_xe_timestamp is None:
+                # First sample - save and return 0
+                self._prev_xe_idle_ms = current_idle_ms
+                self._prev_xe_timestamp = current_time
+                return 0.0
             
-            # Second sample
-            with open(idle_path, 'r') as f:
-                idle_ms2 = int(f.read().strip())
-            time2 = time.time()
+            # Calculate deltas
+            time_delta = (current_time - self._prev_xe_timestamp) * 1000  # Convert to ms
+            idle_delta = current_idle_ms - self._prev_xe_idle_ms  # Already in ms
             
-            # Calculate utilization
-            idle_delta_ms = idle_ms2 - idle_ms1
-            time_delta_ms = (time2 - time1) * 1000
+            # Save current values for next calculation
+            self._prev_xe_idle_ms = current_idle_ms
+            self._prev_xe_timestamp = current_time
             
-            if time_delta_ms <= 0:
+            if time_delta <= 0:
                 return None
             
             # Utilization = 100 - (idle_percentage)
-            idle_percentage = (idle_delta_ms / time_delta_ms) * 100
-            utilization = max(0, min(100, 100 - idle_percentage))
+            idle_percentage = (idle_delta / time_delta) * 100
+            utilization = max(0.0, min(100.0, 100 - idle_percentage))
             
             return utilization
             

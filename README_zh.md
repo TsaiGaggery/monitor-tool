@@ -1,63 +1,80 @@
 # 系統監控工具
 
-Linux 系統全面的即時監控儀表板，支援 CPU、GPU、NPU、記憶體、網路和磁碟 I/O 監控以及頻率控制。
+Linux 和 Android 雙平台系統監控工具，支援即時 CPU、GPU、記憶體、網路和磁碟 I/O 監控以及頻率控制。
 
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
-![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)
+![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Android-lightgrey.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
 [English](README.md)
 
 ## 功能特性
 
-### 🖥️ 即時監控
-- **CPU 監控**
-  - 整體和單核心利用率
-  - 即時頻率監控
-  - 溫度監控（支援多個感測器）
-  - CPU 統計資訊（上下文切換、中斷等）
+### 🖥️ **雙模式支援**
+- **本地模式**：監控 Ubuntu/Linux 系統
+- **Android 模式**：透過 ADB 遠端監控 Android 裝置
 
-- **GPU 監控**
-  - NVIDIA GPU 支援（透過 pynvml）
-  - AMD GPU 支援（透過 rocm-smi）
-  - Intel GPU 支援（i915/Xe 驅動程式）
-  - GPU 利用率、溫度、記憶體
-  - 時脈速度監控
-  - 雙軸圖表（使用率 + 頻率）
+### 📊 **全面監控**
+- CPU 利用率、頻率、溫度（支援單核心）
+- GPU 利用率和記憶體（Intel i915/Xe、NVIDIA、AMD）
+- NPU 監控（Intel Meteor Lake+）
+- 記憶體和 Swap 使用量
+- 網路流量和速度監控
+- 磁碟 I/O 和分割區使用狀況
+- 即時圖表和歷史資料記錄
 
-- **NPU 監控**
-  - Intel NPU 支援（Meteor Lake+）
-  - RockChip、Qualcomm、MediaTek 平台支援
-  - 利用率和頻率追蹤
-  - 雙軸即時視覺化
+### ⚙️ **頻率控制**
+- CPU 調速器控制（performance/powersave）
+- CPU 頻率範圍調整
+- GPU 頻率控制
+- **Ubuntu 和 Android 雙平台支援（需要 root）**
 
-- **記憶體監控**
-  - RAM 使用量詳細分解
-  - Swap 使用量追蹤
-  - 歷史趨勢
+### 💾 **資料匯出**
+- SQLite 資料庫記錄
+- HTML 報告生成
+- CSV 匯出支援
 
-- **網路監控** 🌐
-  - 即時上傳/下載速度
-  - 網路介面統計
-  - 活躍連線數（TCP/UDP）
-  - 封包統計（發送/接收、錯誤、丟包）
-  - 雙軸速度圖表
+## 快速開始
 
-- **磁碟 I/O 監控** 💿
-  - 即時讀取/寫入速度
-  - IOPS（每秒讀寫次數）
-  - 分割區使用狀況
-  - 多磁碟支援
-  - 雙軸 I/O 圖表
+### 本地模式（Ubuntu/Linux）
 
-### ⚙️ 頻率控制
-- CPU 調速器控制（Performance、Powersave、Ondemand）
-- 最小/最大頻率調整
-- 快速效能預設
+```bash
+# 安裝
+./scripts/install.sh
 
-### 📊 資料記錄和匯出
-- SQLite 資料庫儲存
-- **自動清理**：每次啟動時自動刪除 3 天前的資料
+# 執行
+./monitor-tool
+```
+
+或在應用程式選單搜尋「System Monitor Tool」。
+
+### Android 模式
+
+```bash
+# 1. 在 Android 裝置啟用 ADB 並透過 WiFi/USB 連接
+# 2. 執行監控
+python3 src/main.py --adb --ip <Android_IP>
+
+# 範例
+python3 src/main.py --adb --ip 192.168.1.68
+```
+
+**Android 模式需求**：
+- Android 裝置啟用 ADB
+- Root 權限（su）用於頻率控制（監控功能不需要）
+
+## 系統需求
+
+### 本地模式
+- **作業系統**：Ubuntu 18.04+ 或基於 Debian 的 Linux
+- **Python**：3.8+
+- **硬體**：Intel/NVIDIA/AMD GPU（選用）、Intel NPU（Meteor Lake+，選用）
+
+### Android 模式
+- **主機**：Ubuntu/Linux 並安裝 ADB
+- **Android**：支援 ADB 的 Android x86/ARM 裝置
+- **網路**：WiFi 或 USB 連接
+- **Root**：頻率控制需要（監控不需要）
 - 匯出格式：CSV、JSON、HTML
 - 互動式 HTML 報告（13+ 圖表）
 - 縮放、平移和篩選功能

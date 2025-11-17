@@ -8,8 +8,8 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtGui import QFont
 
-from monitors import CPUMonitor, GPUMonitor, MemoryMonitor, NPUMonitor, NetworkMonitor, DiskMonitor
-from controllers import FrequencyController
+from data_source import MonitorDataSource, LocalDataSource, AndroidDataSource
+from controllers import FrequencyController, ADBFrequencyController
 from storage import DataLogger, DataExporter
 from ui.widgets.plot_widget import MonitorPlotWidget, MultiLinePlotWidget
 from ui.widgets.control_panel import ControlPanel
@@ -22,27 +22,61 @@ import time
 class MainWindow(QMainWindow):
     """Main application window."""
     
-    def __init__(self):
+    def __init__(self, data_source: MonitorDataSource = None):
+        """Initialize main window.
+        
+        Args:
+            data_source: Data source for monitoring (defaults to LocalDataSource)
+        """
         super().__init__()
-        self.setWindowTitle("System Monitor Tool - Pro Edition")
+        
+        # Initialize data source
+        if data_source is None:
+            self.data_source = LocalDataSource()
+        else:
+            self.data_source = data_source
+        
+        # Connect to data source
+        if not self.data_source.is_connected():
+            self.data_source.connect()
+        
+        # Set window title based on data source
+        self.setWindowTitle(f"System Monitor Tool - {self.data_source.get_source_name()}")
         self.setGeometry(100, 100, 1200, 800)
         
         # Store chart colors
         self.chart_colors = CHART_COLORS
         
-        # Initialize monitors
-        self.cpu_monitor = CPUMonitor()
-        self.gpu_monitor = GPUMonitor()
-        self.memory_monitor = MemoryMonitor()
-        self.npu_monitor = NPUMonitor()
-        self.network_monitor = NetworkMonitor()
-        self.disk_monitor = DiskMonitor()
-        self.freq_controller = FrequencyController()
+        # Initialize frequency controller
+        if isinstance(self.data_source, LocalDataSource):
+            # Local Ubuntu system
+            self.freq_controller = FrequencyController()
+        elif isinstance(self.data_source, AndroidDataSource):
+            # Android device via ADB
+            device_id = f"{self.data_source.device_ip}:{self.data_source.port}"
+            adb_freq_ctrl = ADBFrequencyController(device_id)
+            
+            # Only use if available (has root + script working)
+            if adb_freq_ctrl.is_available:
+                self.freq_controller = adb_freq_ctrl
+                print(f"✅ Android frequency control enabled")
+            else:
+                self.freq_controller = None
+                print(f"⚠️  Android frequency control disabled (requires root)")
+        else:
+            self.freq_controller = None
+        
+        # Initialize storage
         self.data_logger = DataLogger()
-        self.data_exporter = DataExporter()
+        self.data_exporter = DataExporter(data_source=self.data_source)
         
         # Timing
         self.start_time = time.time()
+        
+        # Pre-fetch initial data to determine available features
+        self._initial_cpu_info = self.data_source.get_cpu_info()
+        self._initial_gpu_info = self.data_source.get_gpu_info()
+        self._initial_npu_info = self.data_source.get_npu_info()
         
         # Initialize UI
         self.init_ui()
@@ -84,12 +118,12 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(memory_tab, "Memory")
         
         # GPU tab (if available)
-        if self.gpu_monitor.gpu_type:
+        if self._initial_gpu_info.get('available', False):
             gpu_tab = self.create_gpu_tab()
             self.tabs.addTab(gpu_tab, "GPU")
         
         # NPU tab (if available)
-        if self.npu_monitor.available:
+        if self._initial_npu_info.get('available', False):
             npu_tab = self.create_npu_tab()
             self.tabs.addTab(npu_tab, "NPU")
         
@@ -135,7 +169,7 @@ class MainWindow(QMainWindow):
         cards_layout.addWidget(self.memory_card)
         
         # GPU Card (if available)
-        if self.gpu_monitor.gpu_type:
+        if self._initial_gpu_info.get('available', False):
             self.gpu_card = InfoCard("GPU", "🎮")
             self.gpu_card.set_color("#FF9800")
             cards_layout.addWidget(self.gpu_card)
@@ -174,13 +208,13 @@ class MainWindow(QMainWindow):
         charts_layout.addWidget(self.overview_disk_plot, 1, 1)
         
         # Row 3: GPU and NPU (if available)
-        if self.gpu_monitor.gpu_type:
+        if self._initial_gpu_info.get('available', False):
             self.overview_gpu_plot = MultiLinePlotWidget("GPU Usage & Frequency",
                                                          y_label="Usage (%)",
                                                          y_label2="Freq (MHz)")
             charts_layout.addWidget(self.overview_gpu_plot, 2, 0)
         
-        if self.npu_monitor.available:
+        if self._initial_npu_info.get('available', False):
             self.overview_npu_plot = MultiLinePlotWidget("NPU Usage & Frequency",
                                                          y_label="Usage (%)",
                                                          y_label2="Freq (MHz)")
@@ -200,7 +234,8 @@ class MainWindow(QMainWindow):
         info_group = QGroupBox("CPU Information")
         info_layout = QGridLayout()
         
-        self.cpu_cores_label = QLabel(f"Cores: {self.cpu_monitor.cpu_count}")
+        cpu_count = self._initial_cpu_info.get('cpu_count', 0)
+        self.cpu_cores_label = QLabel(f"Cores: {cpu_count}")
         self.cpu_freq_label = QLabel("Frequency: -")
         self.cpu_temp_label = QLabel("Temperature: -")
         self.cpu_governor_label = QLabel("Governor: -")
@@ -298,8 +333,7 @@ class MainWindow(QMainWindow):
         info_group = QGroupBox("NPU Information")
         info_layout = QGridLayout()
         
-        npu_info = self.npu_monitor.get_all_info()
-        platform = npu_info.get('platform', 'Unknown')
+        platform = self._initial_npu_info.get('platform', 'Unknown')
         
         self.npu_platform_label = QLabel(f"Platform: {platform}")
         self.npu_usage_label = QLabel("Usage: -")
@@ -449,7 +483,7 @@ class MainWindow(QMainWindow):
         current_time = time.time() - self.start_time
         
         # CPU data
-        cpu_info = self.cpu_monitor.get_all_info()
+        cpu_info = self.data_source.get_cpu_info()
         cpu_usage = cpu_info['usage']['total']
         cpu_freq = cpu_info['frequency']['average']
         
@@ -464,13 +498,16 @@ class MainWindow(QMainWindow):
                 temp = first_sensor[0]['current']
                 self.cpu_temp_label.setText(f"Temperature: {temp:.1f}°C")
         
-        # CPU governor
-        governor = self.freq_controller.get_current_cpu_governor()
-        if governor:
-            self.cpu_governor_label.setText(f"Governor: {governor}")
+        # CPU governor (skip in ADB mode)
+        if self.freq_controller:
+            governor = self.freq_controller.get_current_cpu_governor()
+            if governor:
+                self.cpu_governor_label.setText(f"Governor: {governor}")
+        else:
+            self.cpu_governor_label.setText(f"Governor: N/A (Android)")
         
         # Memory data
-        memory_info = self.memory_monitor.get_all_info()
+        memory_info = self.data_source.get_memory_info()
         mem = memory_info['memory']
         swap = memory_info['swap']
         
@@ -481,7 +518,7 @@ class MainWindow(QMainWindow):
         self.swap_label.setText(f"{swap['used']:.1f} / {swap['total']:.1f} GB")
         
         # GPU data
-        gpu_info = self.gpu_monitor.get_all_info()
+        gpu_info = self.data_source.get_gpu_info()
         if gpu_info.get('available'):
             gpus = gpu_info['gpus']
             if gpus:
@@ -515,23 +552,22 @@ class MainWindow(QMainWindow):
                     self.gpu_usage_plot.update_data(gpu_util, gpu_freq, current_time)
         
         # NPU data
-        if self.npu_monitor.available:
-            npu_info = self.npu_monitor.get_all_info()
-            if npu_info.get('available'):
-                util = npu_info.get('utilization', 0)
-                freq = npu_info.get('frequency', 0)
-                
-                self.npu_usage_label.setText(f"{util:.1f}%")
-                self.npu_freq_label.setText(f"{freq:.0f} MHz")
-                
-                # Update NPU plot with usage and frequency
-                self.npu_usage_plot.update_data(util, freq, current_time)
+        npu_info = self.data_source.get_npu_info()
+        if npu_info.get('available'):
+            util = npu_info.get('utilization', 0)
+            freq = npu_info.get('frequency', 0)
+            
+            self.npu_usage_label.setText(f"{util:.1f}%")
+            self.npu_freq_label.setText(f"{freq:.0f} MHz")
+            
+            # Update NPU plot with usage and frequency
+            self.npu_usage_plot.update_data(util, freq, current_time)
         
         # Network data
-        network_info = self.network_monitor.get_io_stats()
+        network_info = self.data_source.get_network_info()
         upload_speed_mb = network_info.get('upload_speed', 0) / (1024 * 1024)  # Convert to MB/s
         download_speed_mb = network_info.get('download_speed', 0) / (1024 * 1024)
-        connections = self.network_monitor.get_connections_count()
+        connections = network_info.get('connections', {'total': 0, 'tcp_established': 0})
         
         # Update network labels
         self.network_interface_label.setText("Total")
@@ -541,37 +577,36 @@ class MainWindow(QMainWindow):
         
         # Update network card
         self.network_card.update_values(
-            f"↑{upload_speed_mb:.1f} MB/s",
-            f"↓{download_speed_mb:.1f} MB/s"
+            f"↑{upload_speed_mb:.2f} MB/s",
+            f"↓{download_speed_mb:.2f} MB/s"
         )
         
         # Disk data
-        disk_info = self.disk_monitor.get_io_stats()
+        disk_info = self.data_source.get_disk_info()
         read_speed_mb = disk_info.get('read_speed_mb', 0)
         write_speed_mb = disk_info.get('write_speed_mb', 0)
-        root_usage = self.disk_monitor.get_partition_usage('/')
+        root_usage = disk_info.get('partitions', {}).get('/', {})
         
         # Update disk labels
         self.disk_device_label.setText("Total")
         self.disk_read_label.setText(f"{read_speed_mb:.2f} MB/s")
         self.disk_write_label.setText(f"{write_speed_mb:.2f} MB/s")
         if root_usage:
-            self.disk_usage_label.setText(f"{root_usage['used']:.1f} / {root_usage['total']:.1f} GB ({root_usage['percent']:.1f}%)")
+            self.disk_usage_label.setText(f"{root_usage.get('used', 0):.1f} / {root_usage.get('total', 0):.1f} GB ({root_usage.get('percent', 0):.1f}%)")
         
         # Update disk card
         self.disk_card.update_values(
-            f"R:{read_speed_mb:.1f} MB/s",
-            f"W:{write_speed_mb:.1f} MB/s"
+            f"R:{read_speed_mb:.2f} MB/s",
+            f"W:{write_speed_mb:.2f} MB/s"
         )
         
         # Update info cards
         self.cpu_card.update_values(f"{cpu_usage:.1f}%", f"{cpu_freq:.0f} MHz")
         self.memory_card.update_values(f"{mem['percent']:.1f}%", f"{mem['used']:.1f} GB")
         
-        if self.gpu_monitor.gpu_type and hasattr(self, 'gpu_card'):
-            gpu_info_card = self.gpu_monitor.get_all_info()
-            if gpu_info_card.get('available') and gpu_info_card['gpus']:
-                gpu = gpu_info_card['gpus'][0]
+        if self._initial_gpu_info.get('available', False) and hasattr(self, 'gpu_card'):
+            if gpu_info.get('available') and gpu_info['gpus']:
+                gpu = gpu_info['gpus'][0]
                 gpu_util = gpu.get('gpu_util', 0)
                 gpu_temp = gpu.get('temperature', 0)
                 if gpu_temp > 0:
@@ -585,18 +620,17 @@ class MainWindow(QMainWindow):
         self.overview_network_plot.update_data(upload_speed_mb, download_speed_mb, current_time)
         self.overview_disk_plot.update_data(read_speed_mb, write_speed_mb, current_time)
         
-        if self.gpu_monitor.gpu_type and hasattr(self, 'overview_gpu_plot'):
+        if self._initial_gpu_info.get('available', False) and hasattr(self, 'overview_gpu_plot'):
             if gpu_info.get('available') and gpu_info['gpus']:
                 gpu = gpu_info['gpus'][0]
                 gpu_util = gpu.get('gpu_util', 0)
                 gpu_freq = gpu.get('gpu_clock', 0)
                 self.overview_gpu_plot.update_data(gpu_util, gpu_freq, current_time)
         
-        if self.npu_monitor.available and hasattr(self, 'overview_npu_plot'):
-            npu_info_plot = self.npu_monitor.get_all_info()
-            if npu_info_plot.get('available'):
-                util = npu_info_plot.get('utilization', 0)
-                freq = npu_info_plot.get('frequency', 0)
+        if self._initial_npu_info.get('available', False) and hasattr(self, 'overview_npu_plot'):
+            if npu_info.get('available'):
+                util = npu_info.get('utilization', 0)
+                freq = npu_info.get('frequency', 0)
                 self.overview_npu_plot.update_data(util, freq, current_time)
         
         self.cpu_usage_plot.update_data(cpu_usage, current_time)
@@ -607,7 +641,7 @@ class MainWindow(QMainWindow):
         
         # Log data to database
         self.data_logger.log_data(cpu_info, memory_info, gpu_info, 
-                                  npu_info if self.npu_monitor.available else None)
+                                  npu_info if npu_info.get('available', False) else None)
         
         # Add data to exporter
         export_data = {
@@ -619,7 +653,7 @@ class MainWindow(QMainWindow):
             'network': network_info,
             'disk': disk_info
         }
-        if self.npu_monitor.available:
+        if npu_info.get('available', False):
             export_data['npu'] = npu_info
         self.data_exporter.add_sample(export_data)
         
@@ -633,16 +667,15 @@ class MainWindow(QMainWindow):
         )
         
         # Add GPU info if available
-        if self.gpu_monitor.gpu_type and gpu_info.get('available') and gpu_info['gpus']:
+        if self._initial_gpu_info.get('available', False) and gpu_info.get('available') and gpu_info['gpus']:
             gpu = gpu_info['gpus'][0]
             gpu_util = gpu.get('gpu_util', 0)
             status_msg += f" | GPU: {gpu_util}%"
         
         # Add NPU info if available
-        if self.npu_monitor.available:
-            npu_info_status = self.npu_monitor.get_all_info()
-            if npu_info_status.get('available'):
-                npu_util = npu_info_status.get('utilization', 0)
+        if self._initial_npu_info.get('available', False):
+            if npu_info.get('available'):
+                npu_util = npu_info.get('utilization', 0)
                 status_msg += f" | NPU: {npu_util:.1f}%"
         
         self.status_bar.showMessage(status_msg)

@@ -18,11 +18,26 @@ class ControlPanel(QWidget):
         super().__init__(parent)
         self.freq_controller = freq_controller
         self.init_ui()
-        self.update_governor_info()
+        if self.freq_controller is not None:
+            self.update_governor_info()
     
     def init_ui(self):
         """Initialize UI components."""
         layout = QVBoxLayout(self)
+        
+        # If no frequency controller, show disabled message
+        if self.freq_controller is None:
+            disabled_label = QLabel(
+                "⚠️ Frequency control not available\n\n"
+                "Requirements:\n"
+                "• Local: Run with sudo/root\n"
+                "• Android: Root access (su) required"
+            )
+            disabled_label.setStyleSheet("color: #888; padding: 10px;")
+            disabled_label.setWordWrap(True)
+            layout.addWidget(disabled_label)
+            layout.addStretch()
+            return
         
         # CPU Governor Control
         gov_group = QGroupBox("CPU Governor")
