@@ -198,9 +198,10 @@ class MainWindow(QMainWindow):
         charts_layout.addWidget(self.overview_memory_plot, 0, 1)
         
         # Row 2: Network and Disk
+        # Use KB/s for network to avoid scientific notation on small values
         self.overview_network_plot = MultiLinePlotWidget("Network Speed", 
-                                                         y_label="Upload (MB/s)",
-                                                         y_label2="Download (MB/s)")
+                                                         y_label="Upload (KB/s)",
+                                                         y_label2="Download (KB/s)")
         self.overview_disk_plot = MultiLinePlotWidget("Disk I/O", 
                                                       y_label="Read (MB/s)",
                                                       y_label2="Write (MB/s)")
@@ -381,9 +382,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(info_group)
         
         # Network speed plot (dual axis: upload and download)
+        # Use KB/s for better readability with small values
         self.network_speed_plot = MultiLinePlotWidget("Network Speed", 
-                                                      y_label="Upload (MB/s)",
-                                                      y_label2="Download (MB/s)")
+                                                      y_label="Upload (KB/s)",
+                                                      y_label2="Download (KB/s)")
         layout.addWidget(self.network_speed_plot)
         
         return widget
@@ -565,20 +567,33 @@ class MainWindow(QMainWindow):
         
         # Network data
         network_info = self.data_source.get_network_info()
-        upload_speed_mb = network_info.get('upload_speed', 0) / (1024 * 1024)  # Convert to MB/s
-        download_speed_mb = network_info.get('download_speed', 0) / (1024 * 1024)
+        upload_speed_bytes = network_info.get('upload_speed', 0)  # bytes/sec
+        download_speed_bytes = network_info.get('download_speed', 0)  # bytes/sec
         connections = network_info.get('connections', {'total': 0, 'tcp_established': 0})
         
-        # Update network labels
+        # Convert to appropriate unit (KB/s or MB/s)
+        def format_speed(bytes_per_sec):
+            mb_per_sec = bytes_per_sec / (1024 * 1024)
+            kb_per_sec = bytes_per_sec / 1024
+            if mb_per_sec >= 0.01:
+                return f"{mb_per_sec:.2f} MB/s"
+            else:
+                return f"{kb_per_sec:.2f} KB/s"
+        
+        # For charts: use KB/s to avoid scientific notation
+        upload_speed_kb = upload_speed_bytes / 1024  # KB/s for chart
+        download_speed_kb = download_speed_bytes / 1024  # KB/s for chart
+        
+        # Update network labels with better formatting
         self.network_interface_label.setText("Total")
-        self.network_upload_label.setText(f"{upload_speed_mb:.2f} MB/s")
-        self.network_download_label.setText(f"{download_speed_mb:.2f} MB/s")
+        self.network_upload_label.setText(format_speed(upload_speed_bytes))
+        self.network_download_label.setText(format_speed(download_speed_bytes))
         self.network_connections_label.setText(f"{connections.get('total', 0)} ({connections.get('tcp_established', 0)} TCP)")
         
-        # Update network card
+        # Update network card with better formatting
         self.network_card.update_values(
-            f"↑{upload_speed_mb:.2f} MB/s",
-            f"↓{download_speed_mb:.2f} MB/s"
+            f"↑{format_speed(upload_speed_bytes)}",
+            f"↓{format_speed(download_speed_bytes)}"
         )
         
         # Disk data
@@ -617,7 +632,7 @@ class MainWindow(QMainWindow):
         # Update plots
         self.overview_cpu_plot.update_data(cpu_usage, current_time)
         self.overview_memory_plot.update_data(mem['percent'], current_time)
-        self.overview_network_plot.update_data(upload_speed_mb, download_speed_mb, current_time)
+        self.overview_network_plot.update_data(upload_speed_kb, download_speed_kb, current_time)
         self.overview_disk_plot.update_data(read_speed_mb, write_speed_mb, current_time)
         
         if self._initial_gpu_info.get('available', False) and hasattr(self, 'overview_gpu_plot'):
@@ -636,7 +651,7 @@ class MainWindow(QMainWindow):
         self.cpu_usage_plot.update_data(cpu_usage, current_time)
         self.cpu_freq_plot.update_data(cpu_freq, current_time)
         self.memory_usage_plot.update_data(mem['percent'], current_time)
-        self.network_speed_plot.update_data(upload_speed_mb, download_speed_mb, current_time)
+        self.network_speed_plot.update_data(upload_speed_kb, download_speed_kb, current_time)
         self.disk_io_plot.update_data(read_speed_mb, write_speed_mb, current_time)
         
         # Log data to database
@@ -658,11 +673,20 @@ class MainWindow(QMainWindow):
         self.data_exporter.add_sample(export_data)
         
         # Update status bar
+        # Format network speed for status bar - clearer format
+        def format_speed_short(bytes_per_sec):
+            mb = bytes_per_sec / (1024 * 1024)
+            kb = bytes_per_sec / 1024
+            if mb >= 1.0:
+                return f"{mb:.1f}M"
+            else:
+                return f"{kb:.0f}K"
+        
         status_msg = (
             f"Last update: {time.strftime('%H:%M:%S')} | "
             f"CPU: {cpu_usage:.1f}% | "
             f"Mem: {mem['percent']:.1f}% | "
-            f"Net: ↑{upload_speed_mb:.1f}/↓{download_speed_mb:.1f} MB/s | "
+            f"Net: ↑{format_speed_short(upload_speed_bytes)}/↓{format_speed_short(download_speed_bytes)} | "
             f"Disk: R{read_speed_mb:.1f}/W{write_speed_mb:.1f} MB/s"
         )
         

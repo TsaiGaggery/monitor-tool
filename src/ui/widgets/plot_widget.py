@@ -253,6 +253,18 @@ class MultiLinePlotWidget(QWidget):
         self.plot_widget.getAxis('right').setPen('#3a3a3a')
         self.plot_widget.getAxis('right').setTextPen('#e0e0e0')
         
+        # Set Y-axis range based on plot type
+        title_lower = self.title.lower()
+        if 'network' in title_lower:
+            # Network uses KB/s: enable auto-range starting from reasonable range
+            # Don't set hard limits - let it scale automatically
+            self.plot_widget.enableAutoRange(axis='y', enable=True)
+            self.viewbox2.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+        elif 'disk' in title_lower or 'io' in title_lower:
+            # Disk uses MB/s: enable auto-range
+            self.plot_widget.enableAutoRange(axis='y', enable=True)
+            self.viewbox2.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+        
         # Update views when plot is resized
         def update_views():
             self.viewbox2.setGeometry(self.plot_widget.getViewBox().sceneBoundingRect())
