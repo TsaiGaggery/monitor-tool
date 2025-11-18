@@ -2,9 +2,10 @@
 # Remote Linux System Monitor - JSON Streaming + SQLite Storage
 # Outputs monitoring data in JSON format, similar to Android monitor
 # Also stores data in local SQLite database
-# Usage: ssh user@host "bash -s" < linux_monitor.sh [interval]
+# Usage: ssh user@host "bash -s" < linux_monitor.sh [interval] [enable_tier1]
 
 INTERVAL=${1:-1}
+ENABLE_TIER1=${2:-0}  # 0=disabled, 1=enabled (Tier 1 metrics: ctxt, load, procs, irq%)
 DB_PATH="/tmp/monitor_tool_${USER}.db"
 
 # Previous values for delta calculation (only for NPU, GPU calculation moved to host)
@@ -14,38 +15,47 @@ FIRST_SAMPLE=true
 
 # Initialize SQLite database
 init_database() {
-    sqlite3 "$DB_PATH" <<EOF
-CREATE TABLE IF NOT EXISTS raw_samples (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp INTEGER NOT NULL,
-    timestamp_ms INTEGER,
-    cpu_user INTEGER,
-    cpu_nice INTEGER,
-    cpu_sys INTEGER,
-    cpu_idle INTEGER,
-    cpu_iowait INTEGER,
-    cpu_irq INTEGER,
-    cpu_softirq INTEGER,
-    cpu_steal INTEGER,
-    per_core_raw TEXT,
-    per_core_freq_khz TEXT,
-    cpu_temp_millideg INTEGER,
-    mem_total_kb INTEGER,
-    mem_free_kb INTEGER,
-    mem_available_kb INTEGER,
-    gpu_driver TEXT,
-    gpu_freq_mhz INTEGER,
-    gpu_runtime_ms INTEGER,
-    gpu_memory_used_bytes INTEGER,
-    gpu_memory_total_bytes INTEGER,
-    npu_info TEXT,
-    net_rx_bytes INTEGER,
-    net_tx_bytes INTEGER,
-    disk_read_sectors INTEGER,
-    disk_write_sectors INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_timestamp ON raw_samples(timestamp);
-EOF
+    # Use printf instead of heredoc since script is piped through SSH
+    printf "%s\n" \
+        "CREATE TABLE IF NOT EXISTS raw_samples (" \
+        "    id INTEGER PRIMARY KEY AUTOINCREMENT," \
+        "    timestamp INTEGER NOT NULL," \
+        "    timestamp_ms INTEGER," \
+        "    cpu_user INTEGER," \
+        "    cpu_nice INTEGER," \
+        "    cpu_sys INTEGER," \
+        "    cpu_idle INTEGER," \
+        "    cpu_iowait INTEGER," \
+        "    cpu_irq INTEGER," \
+        "    cpu_softirq INTEGER," \
+        "    cpu_steal INTEGER," \
+        "    per_core_raw TEXT," \
+        "    per_core_freq_khz TEXT," \
+        "    cpu_temp_millideg INTEGER," \
+        "    mem_total_kb INTEGER," \
+        "    mem_free_kb INTEGER," \
+        "    mem_available_kb INTEGER," \
+        "    gpu_driver TEXT," \
+        "    gpu_freq_mhz INTEGER," \
+        "    gpu_runtime_ms INTEGER," \
+        "    gpu_memory_used_bytes INTEGER," \
+        "    gpu_memory_total_bytes INTEGER," \
+        "    npu_info TEXT," \
+        "    net_rx_bytes INTEGER," \
+        "    net_tx_bytes INTEGER," \
+        "    disk_read_sectors INTEGER," \
+        "    disk_write_sectors INTEGER," \
+        "    ctxt INTEGER," \
+        "    load_avg_1m REAL," \
+        "    load_avg_5m REAL," \
+        "    load_avg_15m REAL," \
+        "    procs_running INTEGER," \
+        "    procs_blocked INTEGER," \
+        "    per_core_irq_pct TEXT," \
+        "    per_core_softirq_pct TEXT" \
+        ");" \
+        "CREATE INDEX IF NOT EXISTS idx_timestamp ON raw_samples(timestamp);" \
+        | sqlite3 "$DB_PATH"
 }
 
 # Get raw CPU stats from /proc/stat
@@ -87,6 +97,51 @@ get_cpu_temp_raw() {
         fi
     done
     echo "0"
+}
+
+# Get Tier 1 metrics (context switches, load average, process counts)
+get_tier1_metrics() {
+    if [ "$ENABLE_TIER1" != "1" ]; then
+        # Return null for JSON compatibility (lowercase, not NULL)
+        echo "null null null null null null \"\" \"\""
+        return
+    fi
+    
+    # Context switches (total system-wide)
+    ctxt=$(awk '/^ctxt / {print $2}' /proc/stat)
+    
+    # Load average (1m, 5m, 15m)
+    read load_1m load_5m load_15m procs_running_slash_total < <(cat /proc/loadavg)
+    # Extract running processes from "1/234" format
+    procs_total=$(echo "$procs_running_slash_total" | cut -d'/' -f2)
+    
+    # Process counts (total created, currently running, blocked)
+    procs_running=$(awk '/^procs_running / {print $2}' /proc/stat)
+    procs_blocked=$(awk '/^procs_blocked / {print $2}' /proc/stat)
+    
+    # Calculate per-core IRQ and softirq percentages from per_core_raw
+    # This is done efficiently in one pass
+    per_core_irq_pct=$(awk '/^cpu[0-9]/ {
+        total = $2 + $3 + $4 + $5 + $6 + $7 + $8 + $9
+        if (total > 0) {
+            irq_pct = ($7 * 100.0) / total
+            printf "%.2f,", irq_pct
+        } else {
+            printf "0.00,"
+        }
+    }' /proc/stat | sed 's/,$//')
+    
+    per_core_softirq_pct=$(awk '/^cpu[0-9]/ {
+        total = $2 + $3 + $4 + $5 + $6 + $7 + $8 + $9
+        if (total > 0) {
+            softirq_pct = ($8 * 100.0) / total
+            printf "%.2f,", softirq_pct
+        } else {
+            printf "0.00,"
+        }
+    }' /proc/stat | sed 's/,$//')
+    
+    echo "$ctxt $load_1m $load_5m $load_15m $procs_running $procs_blocked $per_core_irq_pct $per_core_softirq_pct"
 }
 
 # Get raw memory info (kB)
@@ -333,6 +388,22 @@ main() {
         
         read mem_total mem_free mem_available <<< $(get_memory_raw)
         
+        # Tier 1 metrics (conditional)
+        read ctxt load_1m load_5m load_15m procs_running procs_blocked per_core_irq_pct per_core_softirq_pct <<< $(get_tier1_metrics)
+        
+        # Format per_core arrays for JSON (add brackets if not empty, otherwise use empty array)
+        if [ -n "$per_core_irq_pct" ]; then
+            tier1_irq_json="[$per_core_irq_pct]"
+        else
+            tier1_irq_json="[]"
+        fi
+        
+        if [ -n "$per_core_softirq_pct" ]; then
+            tier1_softirq_json="[$per_core_softirq_pct]"
+        else
+            tier1_softirq_json="[]"
+        fi
+        
         # GPU/NPU info
         read gpu_driver gpu_freq gpu_runtime gpu_mem_used gpu_mem_total <<< $(get_gpu_info)
         npu_info=$(get_npu_info "$TIMESTAMP_MS")
@@ -354,13 +425,14 @@ main() {
         # Log every write attempt so we can trace timestamps
         echo "[$(date '+%F %T')] INSERT timestamp=$TIMESTAMP runtime_ms=$gpu_runtime mem_used=$gpu_mem_used" >> /tmp/monitor_db_writes.log
         # Check for errors and log to file for debugging
-        if ! sqlite3 "$DB_PATH" "INSERT INTO raw_samples (timestamp, timestamp_ms, cpu_user, cpu_nice, cpu_sys, cpu_idle, cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz, cpu_temp_millideg, mem_total_kb, mem_free_kb, mem_available_kb, gpu_driver, gpu_freq_mhz, gpu_runtime_ms, gpu_memory_used_bytes, gpu_memory_total_bytes, npu_info, net_rx_bytes, net_tx_bytes, disk_read_sectors, disk_write_sectors) VALUES ($TIMESTAMP, $TIMESTAMP_MS, $cpu_user, $cpu_nice, $cpu_sys, $cpu_idle, $cpu_iowait, $cpu_irq, $cpu_softirq, $cpu_steal, '$per_core_stats', '$per_core_freq', $cpu_temp, $mem_total, $mem_free, $mem_available, '$gpu_driver', $gpu_freq, $gpu_runtime, $gpu_mem_used, $gpu_mem_total, '$npu_info', $net_rx, $net_tx, $disk_read, $disk_write);" 2>>/tmp/monitor_db_errors.log; then
+        if ! sqlite3 "$DB_PATH" "INSERT INTO raw_samples (timestamp, timestamp_ms, cpu_user, cpu_nice, cpu_sys, cpu_idle, cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz, cpu_temp_millideg, mem_total_kb, mem_free_kb, mem_available_kb, gpu_driver, gpu_freq_mhz, gpu_runtime_ms, gpu_memory_used_bytes, gpu_memory_total_bytes, npu_info, net_rx_bytes, net_tx_bytes, disk_read_sectors, disk_write_sectors, ctxt, load_avg_1m, load_avg_5m, load_avg_15m, procs_running, procs_blocked, per_core_irq_pct, per_core_softirq_pct) VALUES ($TIMESTAMP, $TIMESTAMP_MS, $cpu_user, $cpu_nice, $cpu_sys, $cpu_idle, $cpu_iowait, $cpu_irq, $cpu_softirq, $cpu_steal, '$per_core_stats', '$per_core_freq', $cpu_temp, $mem_total, $mem_free, $mem_available, '$gpu_driver', $gpu_freq, $gpu_runtime, $gpu_mem_used, $gpu_mem_total, '$npu_info', $net_rx, $net_tx, $disk_read, $disk_write, $ctxt, $load_1m, $load_5m, $load_15m, $procs_running, $procs_blocked, '$per_core_irq_pct', '$per_core_softirq_pct');" 2>>/tmp/monitor_db_errors.log; then
             echo "[$(date)] DB INSERT failed at timestamp $TIMESTAMP" >> /tmp/monitor_db_errors.log
         fi
         
         # Output JSON to stdout (for SSH streaming to host)
         # Send RAW gpu_runtime_ms AND timestamp_ms for accurate host-side calculation
-        printf '{"timestamp_ms":%s,"cpu_raw":{"user":%d,"nice":%d,"sys":%d,"idle":%d,"iowait":%d,"irq":%d,"softirq":%d,"steal":%d},"per_core_raw":[%s],"per_core_freq_khz":[%s],"cpu_temp_millideg":%d,"mem_total_kb":%d,"mem_free_kb":%d,"mem_available_kb":%d,"gpu_driver":"%s","gpu_freq_mhz":%d,"gpu_runtime_ms":%d,"gpu_memory_used_bytes":%d,"gpu_memory_total_bytes":%d,"npu_info":"%s","net_rx_bytes":%d,"net_tx_bytes":%d,"disk_read_sectors":%d,"disk_write_sectors":%d}\n' \
+        # Tier 1 fields are included conditionally (null values if disabled)
+        printf '{"timestamp_ms":%s,"cpu_raw":{"user":%d,"nice":%d,"sys":%d,"idle":%d,"iowait":%d,"irq":%d,"softirq":%d,"steal":%d},"per_core_raw":[%s],"per_core_freq_khz":[%s],"cpu_temp_millideg":%d,"mem_total_kb":%d,"mem_free_kb":%d,"mem_available_kb":%d,"gpu_driver":"%s","gpu_freq_mhz":%d,"gpu_runtime_ms":%d,"gpu_memory_used_bytes":%d,"gpu_memory_total_bytes":%d,"npu_info":"%s","net_rx_bytes":%d,"net_tx_bytes":%d,"disk_read_sectors":%d,"disk_write_sectors":%d,"ctxt":%s,"load_avg_1m":%s,"load_avg_5m":%s,"load_avg_15m":%s,"procs_running":%s,"procs_blocked":%s,"per_core_irq_pct":%s,"per_core_softirq_pct":%s}\n' \
             "$TIMESTAMP_MS" \
             "$cpu_user" "$cpu_nice" "$cpu_sys" "$cpu_idle" "$cpu_iowait" "$cpu_irq" "$cpu_softirq" "$cpu_steal" \
             "$per_core_stats" "$per_core_freq" "$cpu_temp" \
@@ -368,7 +440,9 @@ main() {
             "$gpu_driver" "$gpu_freq" "$gpu_runtime" "$gpu_mem_used" "$gpu_mem_total" \
             "$npu_info" \
             "$net_rx" "$net_tx" \
-            "$disk_read" "$disk_write"
+            "$disk_read" "$disk_write" \
+            "$ctxt" "$load_1m" "$load_5m" "$load_15m" "$procs_running" "$procs_blocked" \
+            "$tier1_irq_json" "$tier1_softirq_json"
         
         # Sleep until next interval
         LOOP_END=$(date +%s%3N)
