@@ -103,11 +103,6 @@
             color: #888;
             font-size: 0.9em;
         }
-        .grid-2col {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-        }
         h3 {
             color: #4ecdc4;
             margin-bottom: 15px;
@@ -171,26 +166,24 @@
         <!-- CPU Charts Section -->
         <h3 style="color: #14ffec; margin-top: 30px;">🖥️ CPU Metrics</h3>
         
-        <div class="grid-2col">
-            <div class="chart-container">
-                <div class="chart-title">CPU Usage - Total (%)</div>
-                <canvas id="cpuUsageChart"></canvas>
-            </div>
-            <div class="chart-container">
-                <div class="chart-title">CPU Usage - Per Core (%)</div>
-                <canvas id="cpuPerCoreChart"></canvas>
-            </div>
+        <div class="chart-container">
+            <div class="chart-title">CPU Usage - Total (%)</div>
+            <canvas id="cpuUsageChart"></canvas>
         </div>
         
-        <div class="grid-2col">
-            <div class="chart-container">
-                <div class="chart-title">CPU Frequency - Average (MHz)</div>
-                <canvas id="cpuFreqChart"></canvas>
-            </div>
-            <div class="chart-container">
-                <div class="chart-title">CPU Frequency - Per Core (MHz)</div>
-                <canvas id="cpuPerCoreFreqChart"></canvas>
-            </div>
+        <div class="chart-container">
+            <div class="chart-title">CPU Usage - Per Core (%)</div>
+            <canvas id="cpuPerCoreChart"></canvas>
+        </div>
+        
+        <div class="chart-container">
+            <div class="chart-title">CPU Frequency - Average (MHz)</div>
+            <canvas id="cpuFreqChart"></canvas>
+        </div>
+        
+        <div class="chart-container">
+            <div class="chart-title">CPU Frequency - Per Core (MHz)</div>
+            <canvas id="cpuPerCoreFreqChart"></canvas>
         </div>
         
         <div class="chart-container">
@@ -201,43 +194,39 @@
         <!-- GPU Charts Section -->
         <h3 style="color: #14ffec; margin-top: 30px;">🎮 GPU Metrics</h3>
         
-        <div class="grid-2col">
-            <div class="chart-container">
-                <div class="chart-title">GPU Usage (%) & Frequency (MHz)</div>
-                <canvas id="gpuUsageChart"></canvas>
-            </div>
-            <!-- GPU Memory chart removed: Integrated GPUs share system RAM, no separate memory tracking -->
-            <!-- 
-            <div class="chart-container">
-                <div class="chart-title">GPU Memory (MB) & Utilization (%)</div>
-                <canvas id="gpuMemoryChart"></canvas>
-            </div>
-            -->
+        <div class="chart-container">
+            <div class="chart-title">GPU Usage (%) & Frequency (MHz)</div>
+            <canvas id="gpuUsageChart"></canvas>
+        </div>
+        <!-- GPU Memory chart removed: Integrated GPUs share system RAM, no separate memory tracking -->
+        <!-- 
+        <div class="chart-container">
+            <div class="chart-title">GPU Memory (MB) & Utilization (%)</div>
+            <canvas id="gpuMemoryChart"></canvas>
+        </div>
+        -->
+        
+        <div class="chart-container" id="gpuTempContainer">
+            <div class="chart-title">🌡️ GPU Temperature (°C)</div>
+            <canvas id="gpuTempChart"></canvas>
         </div>
         
-        <div class="grid-2col">
-            <div class="chart-container" id="gpuTempContainer">
-                <div class="chart-title">🌡️ GPU Temperature (°C)</div>
-                <canvas id="gpuTempChart"></canvas>
-            </div>
-            <div class="chart-container" id="gpuPowerContainer">
-                <div class="chart-title">⚡ GPU Power Consumption (W)</div>
-                <canvas id="gpuPowerChart"></canvas>
-            </div>
+        <div class="chart-container" id="gpuPowerContainer">
+            <div class="chart-title">⚡ GPU Power Consumption (W)</div>
+            <canvas id="gpuPowerChart"></canvas>
         </div>
         
         <!-- Memory Charts Section -->
         <h3 style="color: #14ffec; margin-top: 30px;">🧠 Memory Metrics</h3>
         
-        <div class="grid-2col">
-            <div class="chart-container">
-                <div class="chart-title">Memory Usage (%)</div>
-                <canvas id="memoryChart"></canvas>
-            </div>
-            <div class="chart-container">
-                <div class="chart-title">Memory Details (GB)</div>
-                <canvas id="memoryDetailsChart"></canvas>
-            </div>
+        <div class="chart-container">
+            <div class="chart-title">Memory Usage (%)</div>
+            <canvas id="memoryChart"></canvas>
+        </div>
+        
+        <div class="chart-container">
+            <div class="chart-title">Memory Details (GB)</div>
+            <canvas id="memoryDetailsChart"></canvas>
         </div>
         
         <div class="chart-container" id="swapContainer">

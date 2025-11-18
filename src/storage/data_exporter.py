@@ -79,84 +79,39 @@ class DataExporter:
             
             print(f"📅 Exporting data from timestamp >= {start_timestamp}")
             
-            # Copy database file via remote sqlite backup and query locally
-            import tempfile
-            import os
-            import sqlite3
+            # Query remote database directly via SSH (no backup needed)
+            # Use .mode json for easy parsing and .timeout to handle locks
+            sql_query = f"SELECT * FROM raw_samples WHERE timestamp >= {start_timestamp} ORDER BY timestamp ASC"
+            print(f"🔍 DEBUG: SQL query = {sql_query}")
             
-            local_temp_db = tempfile.mktemp(suffix='.db')
-            remote_temp_db = f"/tmp/monitor_export_{ssh_user}_{int(time.time())}.db"
-            
-            # Create consistent backup on remote host using sqlite .backup (handles WAL data)
-            backup_cmd = f"sqlite3 {remote_db_path} \".backup '{remote_temp_db}'\""
+            query_cmd = f"sqlite3 -json {remote_db_path} \".timeout 5000\" \"{sql_query}\""
             ssh_cmd = ["ssh"]
             if self.data_source.key_path:
                 ssh_cmd.extend(["-i", self.data_source.key_path])
             if ssh_port != 22:
                 ssh_cmd.extend(["-p", str(ssh_port)])
             ssh_cmd.append(f"{ssh_user}@{ssh_host}")
-            ssh_cmd.append(backup_cmd)
+            ssh_cmd.append(query_cmd)
             
-            print("📤 Creating remote SQLite backup for export...")
-            result_backup = subprocess.run(
+            print("� Querying remote database via SSH...")
+            result = subprocess.run(
                 ssh_cmd,
                 capture_output=True,
                 text=True,
                 timeout=60
             )
             
-            if result_backup.returncode != 0:
-                print(f"⚠️  Failed to create remote backup: {result_backup.stderr}")
+            if result.returncode != 0:
+                print(f"⚠️  Failed to query remote database: {result.stderr}")
                 return []
             
-            # Copy backup database file via scp
-            scp_cmd = ["scp"]
-            if self.data_source.key_path:
-                scp_cmd.extend(["-i", self.data_source.key_path])
-            if ssh_port != 22:
-                scp_cmd.extend(["-P", str(ssh_port)])
-            scp_cmd.append(f"{ssh_user}@{ssh_host}:{remote_temp_db}")
-            scp_cmd.append(local_temp_db)
-            
-            print(f"📥 Copying backup database via scp...")
-            result_scp = subprocess.run(
-                scp_cmd,
-                capture_output=True,
-                text=True,
-                timeout=60
-            )
-            
-            # Cleanup remote temp db regardless of scp result
-            cleanup_cmd = ["ssh"]
-            if self.data_source.key_path:
-                cleanup_cmd.extend(["-i", self.data_source.key_path])
-            if ssh_port != 22:
-                cleanup_cmd.extend(["-p", str(ssh_port)])
-            cleanup_cmd.append(f"{ssh_user}@{ssh_host}")
-            cleanup_cmd.append(f"rm -f {remote_temp_db}")
-            subprocess.run(cleanup_cmd, capture_output=True, text=True, timeout=10)
-            
-            if result_scp.returncode != 0:
-                print(f"⚠️  Failed to copy backup database: {result_scp.stderr}")
-                if os.path.exists(local_temp_db):
-                    os.remove(local_temp_db)
+            # Parse JSON output
+            try:
+                rows = json.loads(result.stdout) if result.stdout.strip() else []
+            except json.JSONDecodeError as e:
+                print(f"⚠️  Failed to parse query result: {e}")
+                print(f"Output: {result.stdout[:200]}")
                 return []
-            
-            # Query local copy of database (no lock issues!)
-            conn = sqlite3.connect(local_temp_db)
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            
-            sql_query = f"SELECT * FROM raw_samples WHERE timestamp >= {start_timestamp} ORDER BY timestamp ASC"
-            print(f"� DEBUG: SQL query = {sql_query}")
-            
-            cursor.execute(sql_query)
-            rows = [dict(row) for row in cursor.fetchall()]
-            conn.close()
-            
-            # Cleanup local temp db
-            if os.path.exists(local_temp_db):
-                os.remove(local_temp_db)
             
             if not rows:
                 print(f"⚠️  No data found in specified time range")
