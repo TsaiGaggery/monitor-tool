@@ -1,0 +1,436 @@
+"""
+SSH Remote Linux Monitor (Raw Data)
+Similar to ADBMonitorRaw, streams JSON data from remote Linux host
+Uses linux_monitor_remote.sh script for data collection
+"""
+
+import json
+import threading
+import time
+import paramiko
+from typing import Optional, Dict, Any, Callable
+import os
+
+
+class SSHMonitorRaw:
+    """Monitor remote Linux system via SSH, streaming raw JSON data"""
+    
+    def __init__(self, host: str, user: str, password: Optional[str] = None,
+                 key_path: Optional[str] = None, port: int = 22,
+                 interval: int = 1):
+        """
+        Initialize SSH monitor
+        
+        Args:
+            host: Remote host address
+            user: SSH username
+            password: SSH password (optional if using key)
+            key_path: Path to SSH private key (optional if using password)
+            port: SSH port (default 22)
+            interval: Monitoring interval in seconds
+        """
+        self.host = host
+        self.user = user
+        self.password = password
+        self.key_path = key_path
+        self.port = port
+        self.interval = interval
+        
+        self.ssh_client: Optional[paramiko.SSHClient] = None
+        self.monitor_channel = None
+        self.monitor_thread = None
+        self.running = False
+        
+        # Store stdin/stdout/stderr for cleanup
+        self._stdin = None
+        self._stdout = None
+        self._stderr = None
+        
+        self._latest_raw_data: Optional[Dict[str, Any]] = None
+        self._prev_raw_data: Optional[Dict[str, Any]] = None  # For delta calculation
+        self._data_callback: Optional[Callable] = None
+        self._lock = threading.Lock()
+        
+        # Computed data (calculated from deltas)
+        self._gpu_info: Optional[Dict[str, Any]] = None
+        self._npu_info: Optional[Dict[str, Any]] = None
+        
+    def _check_remote_dependencies(self) -> tuple[bool, list[str]]:
+        """
+        Check if remote host has all required dependencies
+        
+        Returns:
+            (success: bool, missing: list[str])
+        """
+        required_commands = {
+            'bash': 'Bourne Again Shell',
+            'awk': 'Text processing (gawk/mawk)',
+            'grep': 'Pattern matching',
+            'cat': 'File concatenation',
+            'date': 'Date/time utilities',
+            'sqlite3': 'SQLite database (REQUIRED for data storage)'
+        }
+        
+        missing = []
+        found = []
+        
+        for cmd, description in required_commands.items():
+            try:
+                stdin, stdout, stderr = self.ssh_client.exec_command(
+                    f'command -v {cmd} >/dev/null 2>&1 && echo "OK" || echo "MISSING"',
+                    timeout=5
+                )
+                result = stdout.read().decode().strip()
+                
+                if result != "OK":
+                    missing.append(f"{cmd:12} - {description}")
+                else:
+                    found.append(f"{cmd:12} ✓")
+                    
+            except Exception as e:
+                print(f"⚠️  Warning: Failed to check {cmd}: {e}")
+                missing.append(f"{cmd:12} - {description} (check failed)")
+        
+        # Print status
+        if found:
+            print("   Found:")
+            for item in found:
+                print(f"     {item}")
+        
+        return (len(missing) == 0, missing)
+    
+    def connect(self) -> bool:
+        """Establish SSH connection and verify dependencies"""
+        try:
+            self.ssh_client = paramiko.SSHClient()
+            self.ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            
+            # Connect with password or key
+            if self.key_path:
+                # Try to load key (may require passphrase)
+                key = None
+                try:
+                    key = paramiko.RSAKey.from_private_key_file(self.key_path)
+                except paramiko.ssh_exception.PasswordRequiredException:
+                    # Key is encrypted, try with password
+                    if self.password:
+                        key = paramiko.RSAKey.from_private_key_file(self.key_path, password=self.password)
+                    else:
+                        raise
+                
+                self.ssh_client.connect(
+                    self.host, port=self.port, username=self.user,
+                    pkey=key, timeout=10,
+                    look_for_keys=False,  # Don't search for keys
+                    allow_agent=False     # Don't use SSH agent
+                )
+            else:
+                self.ssh_client.connect(
+                    self.host, port=self.port, username=self.user,
+                    password=self.password, timeout=10,
+                    look_for_keys=False,  # Don't search for keys automatically
+                    allow_agent=False     # Don't use SSH agent
+                )
+            
+            print(f"✅ SSH connected to {self.user}@{self.host}:{self.port}")
+            
+            # Check dependencies on remote host
+            print("🔍 Checking remote dependencies...")
+            success, missing = self._check_remote_dependencies()
+            
+            if not success:
+                print(f"\n❌ Missing required packages on remote host {self.host}:")
+                for pkg in missing:
+                    print(f"     {pkg}")
+                print("\n📦 Install missing packages:")
+                print("   Ubuntu/Debian:")
+                print("     sudo apt-get install bash gawk grep coreutils sqlite3")
+                print("   RHEL/CentOS:")
+                print("     sudo yum install bash gawk grep coreutils sqlite")
+                print("   Arch Linux:")
+                print("     sudo pacman -S bash gawk grep coreutils sqlite")
+                
+                # Disconnect
+                self.ssh_client.close()
+                self.ssh_client = None
+                return False
+            
+            print("✅ All dependencies satisfied\n")
+            return True
+            
+        except Exception as e:
+            print(f"❌ SSH connection failed: {e}")
+            return False
+    
+    def start_monitoring(self, callback: Optional[Callable] = None):
+        """
+        Start monitoring in background thread
+        
+        Args:
+            callback: Optional callback function to receive data updates
+        """
+        if self.running:
+            return
+        
+        self._data_callback = callback
+        self.running = True
+        
+        self.monitor_thread = threading.Thread(
+            target=self._monitor_loop,
+            daemon=True
+        )
+        self.monitor_thread.start()
+    
+    def _monitor_loop(self):
+        """Background monitoring loop - streams JSON from remote script"""
+        stdin = None
+        stdout = None
+        stderr = None
+        
+        try:
+            # Get path to monitoring script
+            script_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                'scripts', 'linux_monitor_remote.sh'
+            )
+            
+            # Read script content
+            with open(script_path, 'r') as f:
+                script_content = f.read()
+            
+            # Execute remote script via SSH
+            stdin, stdout, stderr = self.ssh_client.exec_command(
+                f'bash -s {self.interval}',
+                get_pty=True
+            )
+            
+            # Store references for cleanup
+            self._stdin = stdin
+            self._stdout = stdout
+            self._stderr = stderr
+            
+            # Send script content to stdin
+            stdin.write(script_content)
+            stdin.flush()
+            stdin.channel.shutdown_write()
+            
+            # Read JSON output line by line
+            while self.running:
+                line = stdout.readline()
+                if not line:
+                    break
+                
+                # Skip non-JSON lines (like "Starting remote Linux monitor...")
+                line = line.strip()
+                if not line.startswith('{'):
+                    continue
+                
+                try:
+                    # Parse JSON data
+                    raw_data = json.loads(line)
+                    self._process_raw_data(raw_data)
+                    
+                except json.JSONDecodeError as e:
+                    print(f"JSON parse error: {e}")
+                    continue
+                
+        except Exception as e:
+            print(f"Monitor loop error: {e}")
+        finally:
+            self.running = False
+            # Clean up streams
+            if stdin:
+                try:
+                    stdin.close()
+                except:
+                    pass
+            if stdout:
+                try:
+                    stdout.close()
+                except:
+                    pass
+            if stderr:
+                try:
+                    stderr.close()
+                except:
+                    pass
+    
+    def _process_raw_data(self, raw_data: Dict[str, Any]):
+        """Process received raw data and calculate deltas (similar to ADBMonitorRaw)"""
+        with self._lock:
+            prev = self._prev_raw_data if self._prev_raw_data else raw_data
+            
+            # Calculate GPU utilization from delta
+            self._gpu_info = self._calculate_gpu_info(raw_data, prev)
+            
+            # Calculate NPU utilization from delta
+            self._npu_info = self._calculate_npu_info(raw_data, prev)
+            
+            # Update stored data
+            self._prev_raw_data = self._latest_raw_data
+            self._latest_raw_data = raw_data
+        
+        # Call callback if registered
+        if self._data_callback:
+            self._data_callback(raw_data)
+    
+    def _calculate_gpu_info(self, raw_data: Dict[str, Any], prev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Parse GPU info from remote (utilization already calculated on host)"""
+        gpu_info_str = raw_data.get('gpu_info', '')
+        if not gpu_info_str or gpu_info_str == 'none':
+            return {'available': False}
+        
+        # Parse Intel Xe GPU info
+        if gpu_info_str.startswith('intel-xe:'):
+            # Format: intel-xe:card_num:name:util:freq_mhz:mem_used_mb (util calculated on host)
+            parts = gpu_info_str.split(':')
+            if len(parts) >= 6:
+                card_num = int(parts[1])
+                gpu_name = parts[2]
+                utilization = int(parts[3])  # Already calculated on host
+                freq_mhz = int(parts[4])
+                mem_mb = int(parts[5])
+                
+                return {
+                    'available': True,
+                    'name': gpu_name,
+                    'gpu_util': utilization,
+                    'gpu_clock': freq_mhz,
+                    'memory_used': mem_mb,
+                    'temperature': 0
+                }
+        
+        # Parse Intel i915 GPU info
+        elif gpu_info_str.startswith('intel-i915:'):
+            # Format: intel-i915:card_num:name:util:freq_mhz:mem_used_mb (util calculated on host)
+            parts = gpu_info_str.split(':')
+            if len(parts) >= 6:
+                card_num = int(parts[1])
+                gpu_name = parts[2]
+                utilization = int(parts[3])  # Already calculated on host
+                freq_mhz = int(parts[4])
+                mem_mb = int(parts[5])
+                
+                return {
+                    'available': True,
+                    'name': gpu_name,
+                    'gpu_util': utilization,
+                    'gpu_clock': freq_mhz,
+                    'memory_used': mem_mb,
+                    'temperature': 0
+                }
+        
+        # Parse NVIDIA GPU info
+        elif gpu_info_str.startswith('nvidia:'):
+            # Format: nvidia:gpu_id:name:util:temp:mem_used:mem_total:freq
+            parts = gpu_info_str.split(':')
+            if len(parts) >= 8:
+                gpu_name = parts[2]
+                utilization = int(parts[3])
+                temp = int(parts[4])
+                mem_used = int(parts[5])
+                freq_mhz = int(parts[7])
+                
+                return {
+                    'available': True,
+                    'name': gpu_name,
+                    'gpu_util': utilization,
+                    'gpu_clock': freq_mhz,
+                    'memory_used': mem_used,
+                    'temperature': temp
+                }
+        
+        return {'available': False}
+    
+    def _calculate_npu_info(self, raw_data: Dict[str, Any], prev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Parse NPU info from remote (utilization already calculated on host)"""
+        npu_info_str = raw_data.get('npu_info', '')
+        if not npu_info_str or npu_info_str == 'none':
+            return {'available': False}
+        
+        # Parse Intel NPU info
+        if npu_info_str.startswith('intel-npu:'):
+            # Format: intel-npu:freq_mhz:max_freq_mhz:mem_mb:util (util calculated on host)
+            parts = npu_info_str.split(':')
+            if len(parts) >= 5:
+                freq_mhz = int(parts[1])
+                max_freq_mhz = int(parts[2])
+                mem_mb = int(parts[3])
+                utilization = int(parts[4])  # Already calculated on host
+                
+                return {
+                    'available': True,
+                    'platform': 'Intel NPU',
+                    'utilization': utilization,
+                    'frequency': freq_mhz,
+                    'max_frequency': max_freq_mhz,
+                    'memory_used': mem_mb,
+                    'power': 0
+                }
+        
+        return {'available': False}
+    
+    def get_gpu_info(self) -> Optional[Dict[str, Any]]:
+        """Get computed GPU info (already calculated in _process_raw_data)"""
+        with self._lock:
+            return self._gpu_info.copy() if self._gpu_info else {'available': False}
+    
+    def get_npu_info(self) -> Optional[Dict[str, Any]]:
+        """Get computed NPU info (already calculated in _process_raw_data)"""
+        with self._lock:
+            return self._npu_info.copy() if self._npu_info else {'available': False}
+    
+    def get_latest_data(self) -> Optional[Dict[str, Any]]:
+        """Get latest monitoring data"""
+        with self._lock:
+            return self._latest_raw_data
+    
+    def stop_monitoring(self):
+        """Stop monitoring"""
+        self.running = False
+        
+        if self.monitor_thread and self.monitor_thread.is_alive():
+            self.monitor_thread.join(timeout=2)
+    
+    def disconnect(self):
+        """Stop monitoring and disconnect SSH"""
+        if self.running:
+            self.running = False
+            
+            # Wait for monitor thread to finish
+            if self.monitor_thread and self.monitor_thread.is_alive():
+                self.monitor_thread.join(timeout=2)
+            
+            # Close SSH streams to terminate remote process
+            if self._stdin:
+                try:
+                    self._stdin.close()
+                except:
+                    pass
+                self._stdin = None
+            
+            if self._stdout:
+                try:
+                    self._stdout.close()
+                except:
+                    pass
+                self._stdout = None
+            
+            if self._stderr:
+                try:
+                    self._stderr.close()
+                except:
+                    pass
+                self._stderr = None
+            
+            # Close SSH connection
+            if self.ssh_client:
+                try:
+                    self.ssh_client.close()
+                except:
+                    pass
+                self.ssh_client = None
+    
+    def __del__(self):
+        """Cleanup on deletion"""
+        self.disconnect()

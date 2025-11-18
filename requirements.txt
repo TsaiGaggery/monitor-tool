@@ -4,6 +4,7 @@ pyqtgraph>=0.13.0
 numpy>=1.21.0
 pynvml>=11.5.0
 PySocks>=1.7.1
+paramiko>=3.0.0
 
 # Testing dependencies
 pytest>=7.0.0

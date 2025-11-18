@@ -180,6 +180,12 @@ class MainWindow(QMainWindow):
             self.gpu_card.set_color("#FF9800")
             cards_layout.addWidget(self.gpu_card)
         
+        # NPU Card (if available)
+        if self._initial_npu_info.get('available', False):
+            self.npu_card = InfoCard("NPU", "🧠")
+            self.npu_card.set_color("#00BCD4")
+            cards_layout.addWidget(self.npu_card)
+        
         # Network Card
         self.network_card = InfoCard("Network", "🌐")
         self.network_card.set_color("#9C27B0")
@@ -519,6 +525,7 @@ class MainWindow(QMainWindow):
         mem = memory_info['memory']
         swap = memory_info['swap']
         
+        # Memory is already in GB from all data sources (Local, Android, SSH)
         # Update memory tab labels
         self.mem_total_label.setText(f"{mem['total']:.1f} GB")
         self.mem_used_label.setText(f"{mem['used']:.1f} GB ({mem['percent']:.1f}%)")
@@ -538,10 +545,8 @@ class MainWindow(QMainWindow):
                     self.gpu_usage_label.setText(f"{gpu_util}%")
                     
                     gpu_freq = gpu.get('gpu_clock', 0)
-                    if gpu_freq > 0:
-                        self.gpu_freq_label.setText(f"{gpu_freq} MHz")
-                    else:
-                        self.gpu_freq_label.setText("N/A")
+                    # Always show frequency, even if 0 (driver may not support act_freq)
+                    self.gpu_freq_label.setText(f"{gpu_freq} MHz")
                     
                     temp = gpu.get('temperature', 0)
                     if temp > 0:
@@ -565,11 +570,13 @@ class MainWindow(QMainWindow):
             util = npu_info.get('utilization', 0)
             freq = npu_info.get('frequency', 0)
             
-            self.npu_usage_label.setText(f"{util:.1f}%")
-            self.npu_freq_label.setText(f"{freq:.0f} MHz")
-            
-            # Update NPU plot with usage and frequency
-            self.npu_usage_plot.update_data(util, freq, current_time)
+            # Only update if NPU UI elements exist (in NPU tab)
+            if hasattr(self, 'npu_usage_label'):
+                self.npu_usage_label.setText(f"{util:.1f}%")
+            if hasattr(self, 'npu_freq_label'):
+                self.npu_freq_label.setText(f"{freq:.0f} MHz")
+            if hasattr(self, 'npu_usage_plot'):
+                self.npu_usage_plot.update_data(util, freq, current_time)
         
         # Network data
         network_info = self.data_source.get_network_info()
@@ -623,17 +630,22 @@ class MainWindow(QMainWindow):
         
         # Update info cards
         self.cpu_card.update_values(f"{cpu_usage:.1f}%", f"{cpu_freq:.0f} MHz")
+        # Memory is already in GB from all data sources
         self.memory_card.update_values(f"{mem['percent']:.1f}%", f"{mem['used']:.1f} GB")
         
         if self._initial_gpu_info.get('available', False) and hasattr(self, 'gpu_card'):
             if gpu_info.get('available') and gpu_info['gpus']:
                 gpu = gpu_info['gpus'][0]
                 gpu_util = gpu.get('gpu_util', 0)
-                gpu_temp = gpu.get('temperature', 0)
-                if gpu_temp > 0:
-                    self.gpu_card.update_values(f"{gpu_util}%", f"{gpu_temp}°C")
-                else:
-                    self.gpu_card.update_values(f"{gpu_util}%", "N/A")
+                gpu_freq = gpu.get('gpu_clock', 0)
+                # Show frequency in overview card
+                self.gpu_card.update_values(f"{gpu_util}%", f"{gpu_freq} MHz")
+        
+        if self._initial_npu_info.get('available', False) and hasattr(self, 'npu_card'):
+            if npu_info.get('available'):
+                npu_util = npu_info.get('utilization', 0)
+                npu_freq = npu_info.get('frequency', 0)
+                self.npu_card.update_values(f"{npu_util:.1f}%", f"{npu_freq:.0f} MHz")
         
         # Update plots
         self.overview_cpu_plot.update_data(cpu_usage, current_time)
@@ -675,6 +687,14 @@ class MainWindow(QMainWindow):
             'network': network_info,
             'disk': disk_info
         }
+        
+        # Add UTC timestamp from device (Android/SSH) if available
+        if hasattr(self.data_source, 'get_timestamp_ms'):
+            timestamp_ms = self.data_source.get_timestamp_ms()
+            if timestamp_ms > 0:
+                # Convert milliseconds to seconds for UTC timestamp
+                export_data['utc_timestamp'] = timestamp_ms // 1000
+        
         if npu_info.get('available', False):
             export_data['npu'] = npu_info
         self.data_exporter.add_sample(export_data)

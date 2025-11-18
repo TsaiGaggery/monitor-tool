@@ -11,6 +11,7 @@ The proxy pattern allows the UI to remain unchanged regardless of data source.
 
 from abc import ABC, abstractmethod
 from typing import Dict, Optional
+import time
 
 
 class MonitorDataSource(ABC):
@@ -340,31 +341,74 @@ class AndroidDataSource(MonitorDataSource):
 class RemoteLinuxDataSource(MonitorDataSource):
     """Remote Linux system data source via SSH.
     
-    TODO: Implement SSH-based monitoring for remote Linux systems.
+    Streams JSON data from remote Linux host using linux_monitor_remote.sh script.
+    Similar architecture to AndroidDataSource (ADBMonitorRaw).
     """
     
-    def __init__(self, host: str, port: int = 22, username: str = None, password: str = None):
+    def __init__(self, host: str, port: int = 22, username: str = None, password: str = None,
+                 key_path: str = None, interval: int = 1):
         """Initialize remote Linux data source.
         
         Args:
             host: Remote host address
             port: SSH port (default: 22)
             username: SSH username
-            password: SSH password (or use key-based auth)
+            password: SSH password (optional if using key)
+            key_path: Path to SSH private key (optional if using password)
+            interval: Monitoring interval in seconds
         """
+        from monitors.ssh_monitor_raw import SSHMonitorRaw
+        
         self.host = host
         self.port = port
         self.username = username
         self.password = password
+        self.key_path = key_path
+        self.interval = interval
+        
+        # For DataExporter to identify this as SSH data source
+        self.ssh_host = host  # Similar to device_ip for Android
+        
+        self.ssh_monitor = SSHMonitorRaw(
+            host=host,
+            user=username,
+            password=password,
+            key_path=key_path,
+            port=port,
+            interval=interval
+        )
+        
         self._connected = False
+        
+        # Previous values for delta calculations (use separate timestamps for different metrics)
+        self._prev_cpu_raw = None
+        self._prev_per_core_raw = None
+        self._prev_cpu_time = None  # Separate timestamp for CPU
+        self._prev_net_bytes = None
+        self._prev_net_time = None  # Separate timestamp for network
+        self._prev_disk_sectors = None
+        self._prev_disk_time = None  # Separate timestamp for disk
     
     def connect(self) -> bool:
         """Connect to remote Linux system via SSH."""
-        # TODO: Implement SSH connection using paramiko
-        raise NotImplementedError("Remote Linux monitoring not yet implemented")
+        if self.ssh_monitor.connect():
+            self.ssh_monitor.start_monitoring()
+            self._connected = True
+            
+            # Wait for initial data to arrive (actively poll for up to 5 seconds)
+            for _ in range(50):  # 50 * 0.1s = 5s max
+                time.sleep(0.1)
+                if self.ssh_monitor.get_latest_data():
+                    # Data received, wait a bit more for GPU/NPU detection
+                    time.sleep(2.0)
+                    break
+            
+            return True
+        return False
     
     def disconnect(self):
         """Disconnect from remote system."""
+        self.ssh_monitor.disconnect()
         self._connected = False
     
     def is_connected(self) -> bool:
@@ -373,31 +417,313 @@ class RemoteLinuxDataSource(MonitorDataSource):
     
     def get_cpu_info(self) -> Dict:
         """Get CPU information from remote system."""
-        raise NotImplementedError("Remote Linux monitoring not yet implemented")
+        raw_data = self.ssh_monitor.get_latest_data()
+        if not raw_data:
+            return self._empty_cpu_info()
+        
+        # Parse CPU raw data
+        cpu_raw = raw_data.get('cpu_raw', {})
+        per_core_raw = raw_data.get('per_core_raw', [])
+        per_core_freq = raw_data.get('per_core_freq_khz', [])
+        cpu_temp = raw_data.get('cpu_temp_millideg', 0)
+        timestamp_ms = raw_data.get('timestamp_ms', 0)
+        
+        # Calculate CPU usage (using remote device timestamp)
+        cpu_usage = self._calculate_cpu_usage(cpu_raw, per_core_raw, timestamp_ms)
+        
+        # Parse frequencies
+        freq_list = [freq / 1000.0 for freq in per_core_freq]  # kHz -> MHz
+        avg_freq = sum(freq_list) / len(freq_list) if freq_list else 0
+        
+        # Format temperature to match psutil format
+        temp_sensors = {}
+        if cpu_temp > 0:
+            temp_sensors['cpu_thermal'] = [
+                {'label': 'Package id 0', 'current': cpu_temp / 1000.0}
+            ]
+        
+        return {
+            'cpu_count': len(per_core_raw),
+            'physical_count': len(per_core_raw),  # Simplified
+            'usage': {
+                'total': cpu_usage['total'],
+                'per_core': cpu_usage['per_core']
+            },
+            'frequency': {
+                'average': avg_freq,
+                'per_core': freq_list
+            },
+            'temperature': temp_sensors
+        }
+    
+    def _calculate_cpu_usage(self, cpu_raw: Dict, per_core_raw: list, timestamp_ms: int) -> Dict:
+        """Calculate CPU usage from raw data (using correct delta algorithm).
+        
+        Args:
+            cpu_raw: Raw CPU stats
+            per_core_raw: Raw per-core CPU stats
+            timestamp_ms: Timestamp from remote device (milliseconds)
+        """
+        # Initialize result
+        result = {'total': 0.0, 'per_core': []}
+        
+        # Calculate total CPU usage
+        if self._prev_cpu_raw and self._prev_cpu_time:
+            # Use remote device timestamp (convert ms to seconds)
+            time_delta = (timestamp_ms - self._prev_cpu_time) / 1000.0
+            
+            if time_delta > 0:
+                # Calculate deltas for each field
+                d_user = cpu_raw.get('user', 0) - self._prev_cpu_raw.get('user', 0)
+                d_nice = cpu_raw.get('nice', 0) - self._prev_cpu_raw.get('nice', 0)
+                d_sys = cpu_raw.get('sys', 0) - self._prev_cpu_raw.get('sys', 0)
+                d_idle = cpu_raw.get('idle', 0) - self._prev_cpu_raw.get('idle', 0)
+                d_iowait = cpu_raw.get('iowait', 0) - self._prev_cpu_raw.get('iowait', 0)
+                d_irq = cpu_raw.get('irq', 0) - self._prev_cpu_raw.get('irq', 0)
+                d_softirq = cpu_raw.get('softirq', 0) - self._prev_cpu_raw.get('softirq', 0)
+                d_steal = cpu_raw.get('steal', 0) - self._prev_cpu_raw.get('steal', 0)
+                
+                # Total = all time
+                d_total = d_user + d_nice + d_sys + d_idle + d_iowait + d_irq + d_softirq + d_steal
+                
+                # Active = total - idle (iowait is active time waiting for I/O)
+                d_active = d_total - d_idle
+                
+                if d_total > 0:
+                    result['total'] = (d_active * 100.0) / d_total
+        
+        # Calculate per-core usage
+        if self._prev_per_core_raw and len(self._prev_per_core_raw) == len(per_core_raw):
+            for i, (prev_core, curr_core) in enumerate(zip(self._prev_per_core_raw, per_core_raw)):
+                d_user = curr_core.get('user', 0) - prev_core.get('user', 0)
+                d_nice = curr_core.get('nice', 0) - prev_core.get('nice', 0)
+                d_sys = curr_core.get('sys', 0) - prev_core.get('sys', 0)
+                d_idle = curr_core.get('idle', 0) - prev_core.get('idle', 0)
+                d_iowait = curr_core.get('iowait', 0) - prev_core.get('iowait', 0)
+                d_irq = curr_core.get('irq', 0) - prev_core.get('irq', 0)
+                d_softirq = curr_core.get('softirq', 0) - prev_core.get('softirq', 0)
+                d_steal = curr_core.get('steal', 0) - prev_core.get('steal', 0)
+                
+                d_total = d_user + d_nice + d_sys + d_idle + d_iowait + d_irq + d_softirq + d_steal
+                d_active = d_total - d_idle
+                
+                if d_total > 0:
+                    usage = (d_active * 100.0) / d_total
+                    result['per_core'].append(usage)
+                else:
+                    result['per_core'].append(0.0)
+        else:
+            result['per_core'] = [0.0] * len(per_core_raw)
+        
+        # Save current as previous (use remote device timestamp in milliseconds)
+        self._prev_cpu_raw = cpu_raw.copy()
+        self._prev_per_core_raw = [core.copy() for core in per_core_raw]
+        self._prev_cpu_time = timestamp_ms
+        
+        return result
     
     def get_memory_info(self) -> Dict:
         """Get memory information from remote system."""
-        raise NotImplementedError("Remote Linux monitoring not yet implemented")
+        raw_data = self.ssh_monitor.get_latest_data()
+        if not raw_data:
+            return self._empty_memory_info()
+        
+        # Convert kB to bytes first
+        mem_total_bytes = raw_data.get('mem_total_kb', 0) * 1024  # kB -> bytes
+        mem_free_bytes = raw_data.get('mem_free_kb', 0) * 1024
+        mem_available_bytes = raw_data.get('mem_available_kb', 0) * 1024
+        
+        mem_used_bytes = mem_total_bytes - mem_available_bytes
+        mem_percent = (mem_used_bytes / mem_total_bytes * 100.0) if mem_total_bytes > 0 else 0.0
+        
+        # Convert to GB to match Local/Android format
+        GB = 1024 ** 3
+        
+        return {
+            'memory': {
+                'total': mem_total_bytes / GB,
+                'used': mem_used_bytes / GB,
+                'free': mem_free_bytes / GB,
+                'available': mem_available_bytes / GB,
+                'percent': mem_percent,
+                'speed': 0  # Not available
+            },
+            'swap': {
+                'total': 0,
+                'used': 0,
+                'free': 0,
+                'percent': 0
+            }
+        }
     
     def get_gpu_info(self) -> Dict:
         """Get GPU information from remote system."""
-        raise NotImplementedError("Remote Linux monitoring not yet implemented")
+        # Use pre-computed GPU info from SSHMonitorRaw (calculated in _process_raw_data)
+        gpu_info = self.ssh_monitor.get_gpu_info()
+        
+        if not gpu_info or not gpu_info.get('available', False):
+            return {'available': False, 'gpus': []}
+        
+        # Convert to standard format
+        return {
+            'available': True,
+            'gpu_type': 'intel' if 'intel' in gpu_info.get('name', '').lower() else 'nvidia',
+            'gpus': [{
+                'index': 0,
+                'name': gpu_info.get('name', 'Unknown GPU'),
+                'gpu_util': gpu_info.get('gpu_util', 0),
+                'memory_used': gpu_info.get('memory_used', 0),
+                'memory_total': 0,  # Not easily available for Intel
+                'temperature': gpu_info.get('temperature', 0),
+                'gpu_clock': gpu_info.get('gpu_clock', 0)
+            }]
+        }
     
     def get_npu_info(self) -> Dict:
         """Get NPU information from remote system."""
-        raise NotImplementedError("Remote Linux monitoring not yet implemented")
+        # Use pre-computed NPU info from SSHMonitorRaw (calculated in _process_raw_data)
+        npu_info = self.ssh_monitor.get_npu_info()
+        
+        if not npu_info or not npu_info.get('available', False):
+            return {'available': False, 'platform': None}
+        
+        # Already in correct format from SSHMonitorRaw
+        return npu_info
     
     def get_network_info(self) -> Dict:
         """Get network information from remote system."""
-        raise NotImplementedError("Remote Linux monitoring not yet implemented")
+        raw_data = self.ssh_monitor.get_latest_data()
+        if not raw_data:
+            return self._empty_network_info()
+        
+        net_rx = raw_data.get('net_rx_bytes', 0)
+        net_tx = raw_data.get('net_tx_bytes', 0)
+        current_time = time.time()
+        
+        # Calculate speeds
+        upload_speed = 0.0
+        download_speed = 0.0
+        
+        if self._prev_net_bytes and self._prev_time:
+            time_delta = current_time - self._prev_time
+            if time_delta > 0:
+                download_speed = (net_rx - self._prev_net_bytes[0]) / time_delta
+                upload_speed = (net_tx - self._prev_net_bytes[1]) / time_delta
+        
+        self._prev_net_bytes = (net_rx, net_tx)
+        self._prev_time = current_time
+        
+        return {
+            'upload_speed': upload_speed,
+            'download_speed': download_speed,
+            'connections': {'total': 0, 'tcp_established': 0},
+            'interfaces': [],
+            'interface_stats': {},
+            'io_stats': {
+                'upload_speed': upload_speed,
+                'download_speed': download_speed,
+                'packets_sent': 0,
+                'packets_recv': 0
+            }
+        }
     
     def get_disk_info(self) -> Dict:
         """Get disk information from remote system."""
-        raise NotImplementedError("Remote Linux monitoring not yet implemented")
+        raw_data = self.ssh_monitor.get_latest_data()
+        if not raw_data:
+            return self._empty_disk_info()
+        
+        disk_read = raw_data.get('disk_read_sectors', 0)
+        disk_write = raw_data.get('disk_write_sectors', 0)
+        timestamp_ms = raw_data.get('timestamp_ms', 0)
+        
+        # Calculate speeds (sectors = 512 bytes, use remote device timestamp)
+        read_speed = 0.0
+        write_speed = 0.0
+        
+        if self._prev_disk_sectors and self._prev_disk_time:
+            # Use remote device timestamp (convert ms to seconds)
+            time_delta = (timestamp_ms - self._prev_disk_time) / 1000.0
+            if time_delta > 0:
+                read_speed = (disk_read - self._prev_disk_sectors[0]) * 512 / time_delta
+                write_speed = (disk_write - self._prev_disk_sectors[1]) * 512 / time_delta
+        
+        self._prev_disk_sectors = (disk_read, disk_write)
+        self._prev_disk_time = timestamp_ms  # Store remote timestamp in milliseconds
+        
+        return {
+            'read_speed_mb': read_speed / (1024 * 1024),
+            'write_speed_mb': write_speed / (1024 * 1024),
+            'partitions': {},
+            'disks': [],
+            'io_stats': {
+                'read_speed': read_speed,
+                'write_speed': write_speed,
+                'read_speed_mb': read_speed / (1024 * 1024),
+                'write_speed_mb': write_speed / (1024 * 1024),
+                'read_iops': 0,
+                'write_iops': 0
+            },
+            'partition_usage': []
+        }
     
     def get_source_name(self) -> str:
         """Get data source name."""
         return f"Remote Linux ({self.host}:{self.port})"
+    
+    def get_timestamp_ms(self) -> int:
+        """Get remote Linux device timestamp in milliseconds (UTC).
+        
+        Returns:
+            UTC timestamp in milliseconds from remote device
+        """
+        raw_data = self.ssh_monitor.get_latest_data()
+        if raw_data:
+            return raw_data.get('timestamp_ms', 0)
+        return 0
+    
+    def _empty_cpu_info(self) -> Dict:
+        """Return empty CPU info."""
+        return {
+            'cpu_count': 0,
+            'physical_count': 0,
+            'usage': {'total': 0, 'per_core': []},
+            'frequency': {'average': 0, 'per_core': []},
+            'temperature': {}
+        }
+    
+    def _empty_memory_info(self) -> Dict:
+        """Return empty memory info."""
+        return {
+            'memory': {'total': 0, 'used': 0, 'free': 0, 'available': 0, 'percent': 0, 'speed': 0},
+            'swap': {'total': 0, 'used': 0, 'free': 0, 'percent': 0}
+        }
+    
+    def _empty_network_info(self) -> Dict:
+        """Return empty network info."""
+        return {
+            'upload_speed': 0,
+            'download_speed': 0,
+            'connections': {'total': 0, 'tcp_established': 0},
+            'interfaces': [],
+            'interface_stats': {},
+            'io_stats': {'upload_speed': 0, 'download_speed': 0, 'packets_sent': 0, 'packets_recv': 0}
+        }
+    
+    def _empty_disk_info(self) -> Dict:
+        """Return empty disk info."""
+        return {
+            'read_speed_mb': 0,
+            'write_speed_mb': 0,
+            'partitions': {},
+            'disks': [],
+            'io_stats': {
+                'read_speed': 0, 'write_speed': 0,
+                'read_speed_mb': 0, 'write_speed_mb': 0,
+                'read_iops': 0, 'write_iops': 0
+            },
+            'partition_usage': []
+        }
 
 
 class RemoteWindowsDataSource(MonitorDataSource):
@@ -459,3 +785,5 @@ class RemoteWindowsDataSource(MonitorDataSource):
     def get_source_name(self) -> str:
         """Get data source name."""
         return f"Remote Windows ({self.host})"
+
+

@@ -748,7 +748,7 @@
         }
         
         // NPU Usage Chart (if available)
-        if (chartData.npu && chartData.npu.usage && chartData.npu.usage.some(u => u > 0)) {
+        if (chartData.npu && chartData.npu.usage && chartData.npu.usage.length > 0) {
             new Chart(document.getElementById('npuUsageChart'), {
                 type: 'line',
                 data: {
