@@ -18,13 +18,14 @@ import json
 import shutil
 import curses
 import threading
+import getpass
 from datetime import datetime
 from typing import Dict, List, Optional
 
 # Add src directory to Python path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from data_source import MonitorDataSource, LocalDataSource, AndroidDataSource
+from data_source import MonitorDataSource, LocalDataSource, AndroidDataSource, RemoteLinuxDataSource
 from storage import DataLogger, DataExporter
 from controllers import FrequencyController, ADBFrequencyController
 
@@ -73,21 +74,25 @@ class CLIMonitor:
             else:
                 self.freq_controller = None
                 print(f"⚠️  Android frequency control disabled (requires root)")
+        elif isinstance(self.data_source, RemoteLinuxDataSource):
+            # Remote Linux via SSH - frequency control not supported yet
+            self.freq_controller = None
+            print(f"⚠️  Frequency control not supported for remote Linux")
         else:
             self.freq_controller = None
         
         # Initialize storage
         # Only use local database for LocalDataSource
-        # Android data is stored on Android device, not locally
+        # Remote data (Android/SSH) is not stored locally
         if isinstance(self.data_source, LocalDataSource):
             self.logger = DataLogger()
         else:
-            self.logger = None  # Android mode - no local logging
+            self.logger = None  # Remote mode - no local logging
         
         # Track session start time for export
         self.session_start_time = None
         
-        # Session data exporter (for Android mode export)
+        # Session data exporter (for remote modes: Android/SSH)
         self.data_exporter = DataExporter(data_source=self.data_source) if not isinstance(self.data_source, LocalDataSource) else None
         
         # Background logging thread
@@ -478,16 +483,22 @@ class CLIMonitor:
         # Export on exit if requested (only this session's data)
         if export_format:
             print(f"\n📊 Exporting session data...")
-            utc_end = datetime.now(timezone.utc)
-            session_end_time = utc_end.strftime('%Y-%m-%d %H:%M:%S')
+            # Use local time for database query (DataLogger uses localtime)
+            local_now = datetime.now()
+            session_end_time = local_now.strftime('%Y-%m-%d %H:%M:%S')
             # Display local time for user
             local_start = utc_now.astimezone()
-            local_end = utc_end.astimezone()
+            local_end = local_now
             print(f"   Session: {local_start.strftime('%Y-%m-%d %H:%M:%S')} to {local_end.strftime('%Y-%m-%d %H:%M:%S')} (local time)")
+            
+            # Convert UTC session_start_time to local time for database query
+            utc_start = datetime.strptime(self.session_start_time, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+            local_start_time = utc_start.astimezone().strftime('%Y-%m-%d %H:%M:%S')
+            
             self.export_data(
                 format=export_format, 
                 output_file=export_output,
-                start_time=self.session_start_time,
+                start_time=local_start_time,
                 end_time=session_end_time
             )
         
@@ -948,6 +959,11 @@ class CLIMonitor:
                     query += " WHERE " + " AND ".join(conditions)
                 query += " ORDER BY timestamp"
                 
+                # Debug: print query details
+                if start_time or end_time:
+                    print(f"   Query: {query}")
+                    print(f"   Params: {params}")
+                
                 cursor.execute(query, params)
                 rows = cursor.fetchall()
                 columns = [desc[0] for desc in cursor.description]
@@ -975,17 +991,16 @@ class CLIMonitor:
                     # Calculate time_seconds from start
                     timestamp_str = data.get('timestamp', '')
                     if first_timestamp is None and timestamp_str:
-                        # Convert UTC timestamp to datetime object
+                        # Database stores local time, parse as local
                         from datetime import datetime, timezone
-                        utc_time = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
-                        first_timestamp = utc_time.astimezone()  # Convert to local time
+                        local_time = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+                        first_timestamp = local_time
                     
                     if first_timestamp and timestamp_str:
-                        utc_time = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
-                        current_time = utc_time.astimezone()  # Convert to local time
-                        time_seconds = (current_time - first_timestamp).total_seconds()
-                        # Use local time string for display
-                        timestamp_local = current_time.strftime('%Y-%m-%d %H:%M:%S')
+                        local_time = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+                        time_seconds = (local_time - first_timestamp).total_seconds()
+                        # Timestamp is already in local time
+                        timestamp_local = timestamp_str
                     else:
                         time_seconds = i
                         timestamp_local = timestamp_str
@@ -1050,6 +1065,9 @@ Examples:
   # Monitor Android device via ADB
   %(prog)s --adb --ip 192.168.1.68
   
+  # Monitor remote Linux via SSH
+  %(prog)s --ssh --host 192.168.1.100 --user username
+  
   # Monitor Android device with custom port
   %(prog)s --adb --ip 172.25.65.75 --port 5555
   
@@ -1061,6 +1079,9 @@ Examples:
   
   # Android monitoring with export on exit
   %(prog)s --adb --ip 192.168.1.68 --export-format html
+  
+  # SSH monitoring with export on exit
+  %(prog)s --ssh --host 192.168.1.100 --user admin -e html
   
   # Run and export CSV on exit
   %(prog)s -e csv
@@ -1102,6 +1123,38 @@ Note: Logging is always enabled. Use --export-format to auto-export when you qui
         help='ADB port (default: 5555)'
     )
     
+    # SSH remote Linux support
+    parser.add_argument(
+        '--ssh',
+        action='store_true',
+        help='Monitor remote Linux system via SSH'
+    )
+    
+    parser.add_argument(
+        '--host',
+        type=str,
+        help='Remote Linux host (IP or hostname)'
+    )
+    
+    parser.add_argument(
+        '--user',
+        type=str,
+        help='SSH username'
+    )
+    
+    parser.add_argument(
+        '--ssh-port',
+        type=int,
+        default=22,
+        help='SSH port (default: 22)'
+    )
+    
+    parser.add_argument(
+        '--key',
+        type=str,
+        help='Path to SSH private key'
+    )
+    
     parser.add_argument(
         '--once', '-1',
         action='store_true',
@@ -1128,6 +1181,12 @@ Note: Logging is always enabled. Use --export-format to auto-export when you qui
     )
     
     parser.add_argument(
+        '--export-only',
+        action='store_true',
+        help='Only export data, do not start monitoring. Use with --export-format.'
+    )
+    
+    parser.add_argument(
         '--start-time',
         type=str,
         help='Export start time (ISO format: YYYY-MM-DD HH:MM:SS)'
@@ -1142,7 +1201,66 @@ Note: Logging is always enabled. Use --export-format to auto-export when you qui
     args = parser.parse_args()
     
     # Create data source based on mode
-    if args.adb:
+    if args.ssh:
+        if not args.host or not args.user:
+            print("❌ Error: --host and --user are required for SSH mode")
+            print("   Example: monitor-tool-cli --ssh --host 192.168.1.100 --user username")
+            return 1
+        
+        print(f"🐧 Remote Linux Monitor Mode")
+        print(f"📡 Host: {args.user}@{args.host}:{args.ssh_port}")
+        
+        # Try to connect with up to 3 password attempts
+        data_source = None
+        max_attempts = 3
+        
+        for attempt in range(1, max_attempts + 1):
+            # Get password or key passphrase
+            password = None
+            if args.key:
+                # Using SSH key - may need passphrase
+                if attempt == 1:
+                    # First try without passphrase
+                    password = None
+                else:
+                    # Key needs passphrase
+                    print(f"⚠️  Key requires passphrase. Attempt {attempt}/{max_attempts}")
+                    password = getpass.getpass(f"🔑 Passphrase for SSH key: ")
+            else:
+                # Using password authentication
+                if attempt == 1:
+                    password = getpass.getpass(f"🔒 SSH password for {args.user}@{args.host}: ")
+                else:
+                    print(f"⚠️  Authentication failed. Attempt {attempt}/{max_attempts}")
+                    password = getpass.getpass(f"🔒 SSH password for {args.user}@{args.host}: ")
+            
+            data_source = RemoteLinuxDataSource(
+                host=args.host,
+                username=args.user,
+                password=password,
+                port=args.ssh_port,
+                key_path=args.key
+            )
+            
+            # Try to connect
+            print(f"🔌 Connecting to {args.user}@{args.host}:{args.ssh_port}...")
+            if data_source.connect():
+                print("✅ Connection successful!")
+                break
+            else:
+                print(f"❌ Connection failed")
+                data_source.disconnect()
+                data_source = None
+        
+        # If all attempts failed, exit
+        if data_source is None:
+            if args.key:
+                print(f"❌ SSH key authentication failed after {max_attempts} attempts")
+            else:
+                print(f"❌ Failed to connect after {max_attempts} attempts")
+            return 1
+            
+    elif args.adb:
         print(f"🤖 Android Monitor Mode")
         print(f"📱 Device: {args.ip}:{args.port}")
         data_source = AndroidDataSource(args.ip, args.port)
@@ -1153,7 +1271,26 @@ Note: Logging is always enabled. Use --export-format to auto-export when you qui
     monitor = CLIMonitor(data_source=data_source, update_interval=args.interval)
     
     try:
-        if args.once:
+        if args.export_only:
+            # Export-only mode: directly export from database without monitoring
+            if not args.export_format:
+                print("❌ Error: --export-only requires --export-format")
+                return 1
+            
+            print(f"\n📊 Exporting session data...")
+            if args.start_time or args.end_time:
+                print(f"   Time range: {args.start_time or 'beginning'} to {args.end_time or 'now'}")
+            else:
+                print(f"   Exporting all data from database")
+            
+            monitor.export_data(
+                format=args.export_format,
+                output_file=args.output,
+                start_time=args.start_time,
+                end_time=args.end_time
+            )
+            
+        elif args.once:
             # Single display mode
             monitor.display_once(format=args.format, output_file=args.output)
         else:

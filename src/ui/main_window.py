@@ -8,8 +8,8 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtGui import QFont
 
-from data_source import MonitorDataSource, LocalDataSource, AndroidDataSource
-from controllers import FrequencyController, ADBFrequencyController
+from data_source import MonitorDataSource, LocalDataSource, AndroidDataSource, RemoteLinuxDataSource
+from controllers import FrequencyController, ADBFrequencyController, SSHFrequencyController
 from storage import DataLogger, DataExporter
 from ui.widgets.plot_widget import MonitorPlotWidget, MultiLinePlotWidget
 from ui.widgets.control_panel import ControlPanel
@@ -63,6 +63,27 @@ class MainWindow(QMainWindow):
             else:
                 self.freq_controller = None
                 print(f"⚠️  Android frequency control disabled (requires root)")
+        elif isinstance(self.data_source, RemoteLinuxDataSource):
+            # Remote Linux system via SSH
+            ssh_freq_ctrl = SSHFrequencyController(
+                host=self.data_source.ssh_monitor.host,
+                port=self.data_source.ssh_monitor.port,
+                user=self.data_source.ssh_monitor.user
+            )
+            
+            # Only use if available (cpufreq support)
+            if ssh_freq_ctrl.is_available:
+                self.freq_controller = ssh_freq_ctrl
+                
+                if ssh_freq_ctrl.has_sudo:
+                    print(f"✅ SSH frequency control enabled (full access)")
+                else:
+                    print(f"⚠️  SSH frequency control enabled (read-only, no sudo)")
+                    # Show setup dialog if no sudo
+                    self._show_sudo_setup_dialog()
+            else:
+                self.freq_controller = None
+                print(f"⚠️  SSH frequency control disabled (no cpufreq support)")
         else:
             self.freq_controller = None
         
@@ -75,6 +96,7 @@ class MainWindow(QMainWindow):
             self.data_logger = None  # Android mode - no local logging
         
         self.data_exporter = DataExporter(data_source=self.data_source)
+        self._last_remote_timestamp_ms = None
         
         # Timing
         self.start_time = time.time()
@@ -179,6 +201,12 @@ class MainWindow(QMainWindow):
             self.gpu_card = InfoCard("GPU", "🎮")
             self.gpu_card.set_color("#FF9800")
             cards_layout.addWidget(self.gpu_card)
+        
+        # NPU Card (if available)
+        if self._initial_npu_info.get('available', False):
+            self.npu_card = InfoCard("NPU", "🧠")
+            self.npu_card.set_color("#00BCD4")
+            cards_layout.addWidget(self.npu_card)
         
         # Network Card
         self.network_card = InfoCard("Network", "🌐")
@@ -487,6 +515,27 @@ class MainWindow(QMainWindow):
     
     def update_data(self):
         """Update all monitoring data."""
+        # For remote sources with queued samples, process each one to prevent data loss
+        queued_samples = []
+        if hasattr(self.data_source, 'process_queued_samples'):
+            queued_samples = self.data_source.process_queued_samples()
+        
+        # If no queued samples, process current state as normal
+        if not queued_samples:
+            self._update_display_and_export()
+            return
+        
+        # Process each queued sample individually
+        for raw_sample in queued_samples:
+            # Temporarily set this as the "current" sample for processing
+            # This is a bit hacky but avoids rewriting all get_*_info methods
+            if hasattr(self.data_source, 'ssh_monitor'):
+                self.data_source.ssh_monitor._latest_raw_data = raw_sample
+            
+            self._update_display_and_export()
+    
+    def _update_display_and_export(self):
+        """Update displays and add sample to exporter."""
         # Get current time
         current_time = time.time() - self.start_time
         
@@ -519,6 +568,7 @@ class MainWindow(QMainWindow):
         mem = memory_info['memory']
         swap = memory_info['swap']
         
+        # Memory is already in GB from all data sources (Local, Android, SSH)
         # Update memory tab labels
         self.mem_total_label.setText(f"{mem['total']:.1f} GB")
         self.mem_used_label.setText(f"{mem['used']:.1f} GB ({mem['percent']:.1f}%)")
@@ -538,10 +588,8 @@ class MainWindow(QMainWindow):
                     self.gpu_usage_label.setText(f"{gpu_util}%")
                     
                     gpu_freq = gpu.get('gpu_clock', 0)
-                    if gpu_freq > 0:
-                        self.gpu_freq_label.setText(f"{gpu_freq} MHz")
-                    else:
-                        self.gpu_freq_label.setText("N/A")
+                    # Always show frequency, even if 0 (driver may not support act_freq)
+                    self.gpu_freq_label.setText(f"{gpu_freq} MHz")
                     
                     temp = gpu.get('temperature', 0)
                     if temp > 0:
@@ -565,11 +613,13 @@ class MainWindow(QMainWindow):
             util = npu_info.get('utilization', 0)
             freq = npu_info.get('frequency', 0)
             
-            self.npu_usage_label.setText(f"{util:.1f}%")
-            self.npu_freq_label.setText(f"{freq:.0f} MHz")
-            
-            # Update NPU plot with usage and frequency
-            self.npu_usage_plot.update_data(util, freq, current_time)
+            # Only update if NPU UI elements exist (in NPU tab)
+            if hasattr(self, 'npu_usage_label'):
+                self.npu_usage_label.setText(f"{util:.1f}%")
+            if hasattr(self, 'npu_freq_label'):
+                self.npu_freq_label.setText(f"{freq:.0f} MHz")
+            if hasattr(self, 'npu_usage_plot'):
+                self.npu_usage_plot.update_data(util, freq, current_time)
         
         # Network data
         network_info = self.data_source.get_network_info()
@@ -623,17 +673,22 @@ class MainWindow(QMainWindow):
         
         # Update info cards
         self.cpu_card.update_values(f"{cpu_usage:.1f}%", f"{cpu_freq:.0f} MHz")
+        # Memory is already in GB from all data sources
         self.memory_card.update_values(f"{mem['percent']:.1f}%", f"{mem['used']:.1f} GB")
         
         if self._initial_gpu_info.get('available', False) and hasattr(self, 'gpu_card'):
             if gpu_info.get('available') and gpu_info['gpus']:
                 gpu = gpu_info['gpus'][0]
                 gpu_util = gpu.get('gpu_util', 0)
-                gpu_temp = gpu.get('temperature', 0)
-                if gpu_temp > 0:
-                    self.gpu_card.update_values(f"{gpu_util}%", f"{gpu_temp}°C")
-                else:
-                    self.gpu_card.update_values(f"{gpu_util}%", "N/A")
+                gpu_freq = gpu.get('gpu_clock', 0)
+                # Show frequency in overview card
+                self.gpu_card.update_values(f"{gpu_util}%", f"{gpu_freq} MHz")
+        
+        if self._initial_npu_info.get('available', False) and hasattr(self, 'npu_card'):
+            if npu_info.get('available'):
+                npu_util = npu_info.get('utilization', 0)
+                npu_freq = npu_info.get('frequency', 0)
+                self.npu_card.update_values(f"{npu_util:.1f}%", f"{npu_freq:.0f} MHz")
         
         # Update plots
         self.overview_cpu_plot.update_data(cpu_usage, current_time)
@@ -665,7 +720,7 @@ class MainWindow(QMainWindow):
             self.data_logger.log_data(cpu_info, memory_info, gpu_info, 
                                       npu_info if npu_info.get('available', False) else None)
         
-        # Add data to exporter
+        # Add data to exporter (only when we have a new remote timestamp)
         export_data = {
             'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
             'time_seconds': current_time,
@@ -675,9 +730,24 @@ class MainWindow(QMainWindow):
             'network': network_info,
             'disk': disk_info
         }
+        
+        # Add UTC timestamp from device (Android/SSH) if available
+        should_add_sample = True
+        if hasattr(self.data_source, 'get_timestamp_ms'):
+            timestamp_ms = self.data_source.get_timestamp_ms()
+            if timestamp_ms > 0:
+                # Convert milliseconds to seconds for UTC timestamp
+                export_data['utc_timestamp'] = timestamp_ms // 1000
+                if self._last_remote_timestamp_ms == timestamp_ms:
+                    should_add_sample = False
+                else:
+                    self._last_remote_timestamp_ms = timestamp_ms
+        
         if npu_info.get('available', False):
             export_data['npu'] = npu_info
-        self.data_exporter.add_sample(export_data)
+        
+        if should_add_sample:
+            self.data_exporter.add_sample(export_data)
         
         # Update status bar
         # Format network speed for status bar - clearer format
@@ -735,18 +805,21 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, 'No Data', 'No monitoring data to export')
                 return
             
-            # Export to all formats (use session_data, don't pull from Android DB)
-            csv_path = self.data_exporter.export_csv(use_android_db=False)
-            json_path = self.data_exporter.export_json(use_android_db=False)
-            html_path = self.data_exporter.export_html(use_android_db=False)
+            # Get actual export count (accounts for DB sources vs session data)
+            actual_count = self.data_exporter.get_export_sample_count()
             
-            # Show success message with all paths
+            # Export to all formats (default behavior: use DB for remote, session for local)
+            csv_path = self.data_exporter.export_csv()
+            json_path = self.data_exporter.export_json()
+            html_path = self.data_exporter.export_html()
+            
+            # Show success message with all paths and actual sample count
             QMessageBox.information(self, 'Export Successful', 
                                    f'Data exported to all formats:\n\n'
                                    f'CSV:  {csv_path}\n'
                                    f'JSON: {json_path}\n'
                                    f'HTML: {html_path}\n\n'
-                                   f'Samples: {len(self.data_exporter.session_data)}')
+                                   f'Samples: {actual_count}')
         except Exception as e:
             QMessageBox.critical(self, 'Export Failed', f'Error exporting data: {str(e)}')
     
@@ -757,10 +830,11 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, 'No Data', 'No monitoring data to export')
                 return
             
+            actual_count = self.data_exporter.get_export_sample_count()
             filepath = self.data_exporter.export_csv()
             QMessageBox.information(self, 'Export Successful', 
                                    f'Data exported to:\n{filepath}\n\n'
-                                   f'Samples: {len(self.data_exporter.session_data)}')
+                                   f'Samples: {actual_count}')
         except Exception as e:
             QMessageBox.critical(self, 'Export Failed', f'Error exporting data: {str(e)}')
     
@@ -771,10 +845,11 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, 'No Data', 'No monitoring data to export')
                 return
             
+            actual_count = self.data_exporter.get_export_sample_count()
             filepath = self.data_exporter.export_json()
             QMessageBox.information(self, 'Export Successful', 
                                    f'Data exported to:\n{filepath}\n\n'
-                                   f'Samples: {len(self.data_exporter.session_data)}')
+                                   f'Samples: {actual_count}')
         except Exception as e:
             QMessageBox.critical(self, 'Export Failed', f'Error exporting data: {str(e)}')
     
@@ -785,11 +860,12 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, 'No Data', 'No monitoring data to export')
                 return
             
+            actual_count = self.data_exporter.get_export_sample_count(use_android_db=False)
             # Use session_data directly, don't pull from Android DB (use_android_db=False)
             filepath = self.data_exporter.export_html(use_android_db=False)
             QMessageBox.information(self, 'Export Successful', 
                                    f'Report generated:\n{filepath}\n\n'
-                                   f'Samples: {len(self.data_exporter.session_data)}')
+                                   f'Samples: {actual_count}')
         except Exception as e:
             QMessageBox.critical(self, 'Export Failed', f'Error exporting data: {str(e)}')
     
@@ -814,6 +890,47 @@ class MainWindow(QMainWindow):
                          'Supports Intel i915 and Xe GPUs\n'
                          'Export to CSV, JSON, and HTML formats\n\n'
                          'Built with PyQt5 and pyqtgraph')
+    
+    def _show_sudo_setup_dialog(self):
+        """Show dialog to setup passwordless sudo for SSH frequency control."""
+        from ui.setup_sudo_dialog import SetupSudoDialog
+        
+        if not isinstance(self.data_source, RemoteLinuxDataSource):
+            return
+        
+        dialog = SetupSudoDialog(
+            host=self.data_source.ssh_monitor.host,
+            port=self.data_source.ssh_monitor.port,
+            user=self.data_source.ssh_monitor.user,
+            parent=self
+        )
+        
+        # Show dialog (non-blocking for first time, just info)
+        if dialog.exec_() == dialog.Accepted:
+            # User completed setup, re-initialize freq controller
+            print("🔄 Re-initializing frequency controller...")
+            
+            ssh_freq_ctrl = SSHFrequencyController(
+                host=self.data_source.ssh_monitor.host,
+                port=self.data_source.ssh_monitor.port,
+                user=self.data_source.ssh_monitor.user
+            )
+            
+            if ssh_freq_ctrl.has_sudo:
+                self.freq_controller = ssh_freq_ctrl
+                print(f"✅ SSH frequency control now has full access!")
+                
+                # Update control panel
+                if hasattr(self, 'control_panel'):
+                    self.control_panel.freq_controller = ssh_freq_ctrl
+                    self.control_panel.update_governor_info()
+                
+                QMessageBox.information(
+                    self,
+                    "Frequency Control Enabled",
+                    "✅ Frequency control is now fully enabled!\n\n"
+                    "You can now adjust CPU governor and frequency settings."
+                )
     
     def closeEvent(self, event):
         """Handle window close event."""

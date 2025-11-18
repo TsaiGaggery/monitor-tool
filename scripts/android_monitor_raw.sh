@@ -28,10 +28,12 @@ CREATE TABLE IF NOT EXISTS raw_samples (
     mem_total_kb INTEGER,
     mem_free_kb INTEGER,
     mem_available_kb INTEGER,
+    gpu_driver TEXT,
     gpu_freq_mhz INTEGER,
     gpu_runtime_ms INTEGER,
     gpu_memory_used_bytes INTEGER,
     gpu_memory_total_bytes INTEGER,
+    npu_info TEXT,
     net_rx_bytes INTEGER,
     net_tx_bytes INTEGER,
     disk_read_sectors INTEGER,
@@ -303,20 +305,22 @@ main() {
         TIMESTAMP_MS=$(date +%s%3N)
         
         # Insert into SQLite database (with proper escaping for JSON arrays)
-        sqlite3 "$DB_PATH" "INSERT INTO raw_samples (timestamp, timestamp_ms, cpu_user, cpu_nice, cpu_sys, cpu_idle, cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz, cpu_temp_millideg, mem_total_kb, mem_free_kb, mem_available_kb, gpu_freq_mhz, gpu_runtime_ms, gpu_memory_used_bytes, gpu_memory_total_bytes, net_rx_bytes, net_tx_bytes, disk_read_sectors, disk_write_sectors) VALUES ($TIMESTAMP, $TIMESTAMP_MS, $cpu_user, $cpu_nice, $cpu_sys, $cpu_idle, $cpu_iowait, $cpu_irq, $cpu_softirq, $cpu_steal, '$per_core_stats', '$per_core_freq', $cpu_temp, $mem_total, $mem_free, $mem_available, $gpu_freq, $gpu_runtime, $gpu_mem_used, $gpu_mem_total, $net_rx, $net_tx, $disk_read, $disk_write);"
+        sqlite3 "$DB_PATH" "INSERT INTO raw_samples (timestamp, timestamp_ms, cpu_user, cpu_nice, cpu_sys, cpu_idle, cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz, cpu_temp_millideg, mem_total_kb, mem_free_kb, mem_available_kb, gpu_driver, gpu_freq_mhz, gpu_runtime_ms, gpu_memory_used_bytes, gpu_memory_total_bytes, npu_info, net_rx_bytes, net_tx_bytes, disk_read_sectors, disk_write_sectors) VALUES ($TIMESTAMP, $TIMESTAMP_MS, $cpu_user, $cpu_nice, $cpu_sys, $cpu_idle, $cpu_iowait, $cpu_irq, $cpu_softirq, $cpu_steal, '$per_core_stats', '$per_core_freq', $cpu_temp, $mem_total, $mem_free, $mem_available, '$GPU_DRIVER', $gpu_freq, $gpu_runtime, $gpu_mem_used, $gpu_mem_total, 'none', $net_rx, $net_tx, $disk_read, $disk_write);"
         
         # Output JSON - single line with printf (no line wrapping issues)
         # Send RAW gpu_runtime_ms AND timestamp_ms for accurate host-side calculation
         # gpu_driver: "i915" (runtime=active time) or "xe" (runtime=idle time, util=100-idle%)
+        # npu_info: "none" for Android (NPU support typically not available on Android x86)
         # disk_read_sectors/disk_write_sectors: CUMULATIVE values (host calculates delta)
         # net_rx_bytes/net_tx_bytes: CUMULATIVE values (host calculates delta)
-        printf '{"timestamp_ms":%s,"cpu_raw":{"user":%d,"nice":%d,"sys":%d,"idle":%d,"iowait":%d,"irq":%d,"softirq":%d,"steal":%d},"per_core_raw":[%s],"per_core_freq_khz":[%s],"cpu_temp_millideg":%d,"mem_total_kb":%d,"mem_free_kb":%d,"mem_available_kb":%d,"gpu_driver":"%s","gpu_freq_mhz":%d,"gpu_runtime_ms":%d,"gpu_memory_used_bytes":%d,"gpu_memory_total_bytes":%d,"net_rx_bytes":%d,"net_tx_bytes":%d,"disk_read_sectors":%d,"disk_write_sectors":%d}\n' \
+        printf '{"timestamp_ms":%s,"cpu_raw":{"user":%d,"nice":%d,"sys":%d,"idle":%d,"iowait":%d,"irq":%d,"softirq":%d,"steal":%d},"per_core_raw":[%s],"per_core_freq_khz":[%s],"cpu_temp_millideg":%d,"mem_total_kb":%d,"mem_free_kb":%d,"mem_available_kb":%d,"gpu_driver":"%s","gpu_freq_mhz":%d,"gpu_runtime_ms":%d,"gpu_memory_used_bytes":%d,"gpu_memory_total_bytes":%d,"npu_info":"%s","net_rx_bytes":%d,"net_tx_bytes":%d,"disk_read_sectors":%d,"disk_write_sectors":%d}\n' \
             "$TIMESTAMP_MS" \
             "$cpu_user" "$cpu_nice" "$cpu_sys" "$cpu_idle" "$cpu_iowait" "$cpu_irq" "$cpu_softirq" "$cpu_steal" \
             "$per_core_stats" "$per_core_freq" "$cpu_temp" \
             "$mem_total" "$mem_free" "$mem_available" \
             "$GPU_DRIVER" \
             "$gpu_freq" "$gpu_runtime" "$gpu_mem_used" "$gpu_mem_total" \
+            "none" \
             "$net_rx" "$net_tx" \
             "$disk_read" "$disk_write"
         

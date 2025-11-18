@@ -206,10 +206,13 @@
                 <div class="chart-title">GPU Usage (%) & Frequency (MHz)</div>
                 <canvas id="gpuUsageChart"></canvas>
             </div>
+            <!-- GPU Memory chart removed: Integrated GPUs share system RAM, no separate memory tracking -->
+            <!-- 
             <div class="chart-container">
                 <div class="chart-title">GPU Memory (MB) & Utilization (%)</div>
                 <canvas id="gpuMemoryChart"></canvas>
             </div>
+            -->
         </div>
         
         <div class="grid-2col">
@@ -549,7 +552,9 @@
             }
         });
         
-        // GPU Memory Chart
+        // GPU Memory Chart - DISABLED for integrated GPUs
+        // Integrated GPUs share system RAM and don't have separate memory tracking
+        /*
         new Chart(document.getElementById('gpuMemoryChart'), {
             type: 'line',
             data: {
@@ -593,6 +598,7 @@
                 }
             }
         });
+        */
         
         // GPU Temperature Chart
         if (chartData.gpu.temp && chartData.gpu.temp.some(t => t > 0)) {
@@ -748,7 +754,7 @@
         }
         
         // NPU Usage Chart (if available)
-        if (chartData.npu && chartData.npu.usage && chartData.npu.usage.some(u => u > 0)) {
+        if (chartData.npu && chartData.npu.usage && chartData.npu.usage.length > 0) {
             new Chart(document.getElementById('npuUsageChart'), {
                 type: 'line',
                 data: {

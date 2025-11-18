@@ -10,8 +10,9 @@ A unified system monitoring tool for Linux and Android devices with real-time CP
 
 ## Features
 
-### 🖥️ **Dual Mode Support**
+### 🖥️ **Multiple Monitoring Modes**
 - **Local Mode**: Monitor Ubuntu/Linux system
+- **Remote Linux Mode**: Monitor remote Linux systems via SSH
 - **Android Mode**: Remote monitor Android devices via ADB
 
 ### 📊 **Comprehensive Monitoring**
@@ -48,6 +49,38 @@ A unified system monitoring tool for Linux and Android devices with real-time CP
 
 Or search "System Monitor Tool" in your application menu.
 
+### Remote Linux Mode (SSH)
+
+Monitor a remote Linux system over SSH without installing anything on the remote host:
+
+```bash
+# Run monitor for remote Linux system
+python3 src/main.py --ssh --ip <REMOTE_IP> --user <USERNAME>
+
+# Example
+python3 src/main.py --ssh --ip 192.168.1.100 --user intel
+
+# With custom SSH port
+python3 src/main.py --ssh --ip 192.168.1.100 --user admin --port 2222
+```
+
+**Features**:
+- ✅ No installation required on remote host (agentless)
+- ✅ Uses remote timestamps for accurate monitoring
+- ✅ Queue-based buffering prevents sample loss
+- ✅ Monitors CPU, memory, GPU (Intel i915/Xe), network, disk I/O
+- ✅ GPU memory correctly handled (shows 0 for integrated GPUs)
+- ✅ Frequency control support (requires sudo on remote)
+- ✅ All data stored in SQLite on remote host (`/tmp/monitor_tool_<user>.db`)
+- ✅ Session data synced to local database on export
+
+**Requirements**:
+- SSH access to remote Linux host
+- Bash shell on remote host
+- Optional: sudo access for frequency control
+
+See [Remote Linux SSH Monitoring Guide](docs/REMOTE_LINUX_SSH.md) for detailed information.
+
 ### Android Mode
 
 ```bash
@@ -69,6 +102,12 @@ python3 src/main.py --adb --ip 192.168.1.68
 - **OS**: Ubuntu 18.04+ or Debian-based Linux
 - **Python**: 3.8+
 - **Hardware**: Intel/NVIDIA/AMD GPU (optional), Intel NPU (Meteor Lake+, optional)
+
+### Remote Linux Mode
+- **Host**: Ubuntu/Linux with Python 3.8+
+- **Remote**: Any Linux system with Bash shell
+- **Connection**: SSH access (password or key-based)
+- **Optional**: sudo access on remote for frequency control
 
 ### Android Mode
 - **Host**: Ubuntu/Linux with ADB installed
@@ -609,6 +648,12 @@ pytest tests/unit/ --cov=src --cov-report=html
 - **Data persistence**: SQLite storage for historical data
 - **Comprehensive exports**: Interactive HTML reports with 13+ charts
 - **Dual-axis plots**: Visualize usage and frequency together
+- **Remote monitoring**:
+  - **Timestamp synchronization**: Uses remote timestamps exclusively to avoid clock skew issues
+  - **Queue-based buffering**: Prevents sample loss during polling intervals (100-sample buffer)
+  - **Agentless SSH monitoring**: No installation required on remote hosts
+  - **GPU memory handling**: Correctly handles integrated GPU memory (shared with system RAM)
+  - **Note**: GPU memory for integrated GPUs shows 0 as they share system RAM. The `/proc/*/fdinfo/*` `drm-resident-*` values represent virtual memory addresses (GTT - Graphics Translation Table) and cannot be accurately aggregated due to buffer sharing between processes.
 
 ## License
 

@@ -10,8 +10,9 @@ Linux 和 Android 雙平台系統監控工具，支援即時 CPU、GPU、記憶�
 
 ## 功能特性
 
-### 🖥️ **雙模式支援**
+### 🖥️ **多種監控模式**
 - **本地模式**：監控 Ubuntu/Linux 系統
+- **遠端 Linux 模式**：透過 SSH 監控遠端 Linux 系統
 - **Android 模式**：透過 ADB 遠端監控 Android 裝置
 
 ### 📊 **全面監控**
@@ -48,6 +49,38 @@ Linux 和 Android 雙平台系統監控工具，支援即時 CPU、GPU、記憶�
 
 或在應用程式選單搜尋「System Monitor Tool」。
 
+### 遠端 Linux 模式（SSH）
+
+透過 SSH 監控遠端 Linux 系統，無需在遠端主機安裝任何軟體：
+
+```bash
+# 監控遠端 Linux 系統
+python3 src/main.py --ssh --ip <遠端_IP> --user <使用者名稱>
+
+# 範例
+python3 src/main.py --ssh --ip 192.168.1.100 --user intel
+
+# 使用自訂 SSH 埠
+python3 src/main.py --ssh --ip 192.168.1.100 --user admin --port 2222
+```
+
+**功能特性**：
+- ✅ 遠端主機無需安裝任何軟體（無代理）
+- ✅ 使用遠端時間戳記避免時鐘偏移問題
+- ✅ 佇列緩衝機制防止樣本遺失
+- ✅ 監控 CPU、記憶體、GPU（Intel i915/Xe）、網路、磁碟 I/O
+- ✅ 正確處理整合式 GPU 記憶體（與系統記憶體共享）
+- ✅ 支援頻率控制（需要遠端 sudo 權限）
+- ✅ 所有資料儲存在遠端主機的 SQLite（`/tmp/monitor_tool_<user>.db`）
+- ✅ 匯出時同步會話資料到本地資料庫
+
+**需求**：
+- SSH 存取遠端 Linux 主機
+- 遠端主機有 Bash shell
+- 選用：sudo 權限用於頻率控制
+
+詳見[遠端 Linux SSH 監控指南](docs/REMOTE_LINUX_SSH.md)。
+
 ### Android 模式
 
 ```bash
@@ -69,6 +102,12 @@ python3 src/main.py --adb --ip 192.168.1.68
 - **作業系統**：Ubuntu 18.04+ 或基於 Debian 的 Linux
 - **Python**：3.8+
 - **硬體**：Intel/NVIDIA/AMD GPU（選用）、Intel NPU（Meteor Lake+，選用）
+
+### 遠端 Linux 模式
+- **主機**：Ubuntu/Linux 並安裝 Python 3.8+
+- **遠端**：任何有 Bash shell 的 Linux 系統
+- **連接**：SSH 存取（密碼或金鑰認證）
+- **選用**：遠端 sudo 權限用於頻率控制
 
 ### Android 模式
 - **主機**：Ubuntu/Linux 並安裝 ADB
@@ -470,6 +509,22 @@ pytest tests/unit/ --cov=src --cov-report=xml --cov-report=term
 pytest tests/unit/ --cov=src --cov-report=html
 # 檢視報告：htmlcov/index.html
 ```
+
+## 技術特性
+
+- **低開銷設計**：對系統影響最小
+- **模組化架構**：易於擴充和維護
+- **跨平台支援**：支援多種 GPU/NPU 平台
+- **即時視覺化**：使用 pyqtgraph 的高效能圖表
+- **資料持久化**：SQLite 儲存歷史資料
+- **全面匯出**：包含 13+ 圖表的互動式 HTML 報告
+- **雙軸圖表**：同時視覺化使用率和頻率
+- **遠端監控**：
+  - **時間戳記同步**：專門使用遠端時間戳記避免時鐘偏移問題
+  - **佇列緩衝**：防止輪詢間隔期間樣本遺失（100 樣本緩衝區）
+  - **無代理 SSH 監控**：遠端主機無需安裝任何軟體
+  - **GPU 記憶體處理**：正確處理整合式 GPU 記憶體（與系統 RAM 共享）
+  - **註記**：整合式 GPU 記憶體顯示為 0，因為它們與系統 RAM 共享。`/proc/*/fdinfo/*` 中的 `drm-resident-*` 值代表虛擬記憶體位址（GTT - Graphics Translation Table），由於多個程序共享緩衝區，無法準確彙總。
 
 ## 授權
 
