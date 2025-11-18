@@ -31,7 +31,8 @@ class ControlPanel(QWidget):
                 "⚠️ Frequency control not available\n\n"
                 "Requirements:\n"
                 "• Local: Run with sudo/root\n"
-                "• Android: Root access (su) required"
+                "• Android: Root access (su) required\n"
+                "• SSH: Passwordless sudo required"
             )
             disabled_label.setStyleSheet("color: #888; padding: 10px;")
             disabled_label.setWordWrap(True)

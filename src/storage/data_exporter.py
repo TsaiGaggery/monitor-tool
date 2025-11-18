@@ -5,6 +5,7 @@ import json
 import csv
 import os
 import subprocess
+import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from pathlib import Path
@@ -68,89 +69,110 @@ class DataExporter:
         print(f"📥 Fetching remote Linux database records from {ssh_user}@{ssh_host}:{ssh_port}...")
         
         try:
-            # Determine time range from actual session data (client-side timestamps)
-            # This ensures we get all data that was collected during the session
-            if self.session_data and len(self.session_data) > 0:
-                # Use first and last sample timestamps from session data
-                first_sample = self.session_data[0]
-                last_sample = self.session_data[-1]
-                
-                # Try to get utc_timestamp first (from device with get_timestamp_ms)
-                start_timestamp = first_sample.get('utc_timestamp')
-                end_timestamp = last_sample.get('utc_timestamp')
-                
-                # Fallback to time_seconds if utc_timestamp not available
-                if start_timestamp is None or end_timestamp is None:
-                    start_timestamp = first_sample.get('time_seconds')
-                    end_timestamp = last_sample.get('time_seconds')
-                
-                # Fallback to parsing timestamp string if time_seconds not available
-                if start_timestamp is None or end_timestamp is None:
-                    first_ts = first_sample.get('timestamp', '')
-                    last_ts = last_sample.get('timestamp', '')
-                    if first_ts and last_ts:
-                        start_timestamp = int(datetime.strptime(first_ts, '%Y-%m-%d %H:%M:%S').timestamp())
-                        end_timestamp = int(datetime.strptime(last_ts, '%Y-%m-%d %H:%M:%S').timestamp())
-                    else:
-                        # Ultimate fallback: use session_start_timestamp
-                        start_timestamp = self.session_start_timestamp
-                        end_timestamp = int(datetime.now().timestamp())
+            # Use session start time from data_source (when monitoring actually started)
+            if hasattr(self.data_source, 'session_start_time') and self.data_source.session_start_time:
+                start_timestamp = int(self.data_source.session_start_time.timestamp())
+                print(f"📅 Using data source session start time: {self.data_source.session_start_time}")
             else:
-                # No session data yet, use session_start_timestamp
                 start_timestamp = self.session_start_timestamp
-                end_timestamp = int(datetime.now().timestamp())
+                print(f"📅 Using exporter session start time: {datetime.fromtimestamp(start_timestamp)}")
             
-            # Fetch data as JSON directly via sqlite3 over SSH
-            # Filter by session time range: from first sample to last sample (client time)
-            sql_query = f"SELECT * FROM raw_samples WHERE timestamp >= {start_timestamp} AND timestamp <= {end_timestamp} ORDER BY timestamp ASC"
+            print(f"📅 Exporting data from timestamp >= {start_timestamp}")
             
-            print(f"📅 Time range: {datetime.fromtimestamp(start_timestamp)} to {datetime.fromtimestamp(end_timestamp)}")
+            # Copy database file via remote sqlite backup and query locally
+            import tempfile
+            import os
+            import sqlite3
             
-            # Build SSH command with key or password
+            local_temp_db = tempfile.mktemp(suffix='.db')
+            remote_temp_db = f"/tmp/monitor_export_{ssh_user}_{int(time.time())}.db"
+            
+            # Create consistent backup on remote host using sqlite .backup (handles WAL data)
+            backup_cmd = f"sqlite3 {remote_db_path} \".backup '{remote_temp_db}'\""
             ssh_cmd = ["ssh"]
-            
-            # Add key path if available
             if self.data_source.key_path:
                 ssh_cmd.extend(["-i", self.data_source.key_path])
-            
-            # Add port if not default
             if ssh_port != 22:
                 ssh_cmd.extend(["-p", str(ssh_port)])
-            
-            # Add host
             ssh_cmd.append(f"{ssh_user}@{ssh_host}")
+            ssh_cmd.append(backup_cmd)
             
-            # Add remote command
-            ssh_cmd.append(f"sqlite3 -json {remote_db_path} '{sql_query}'")
-            
-            result = subprocess.run(
+            print("📤 Creating remote SQLite backup for export...")
+            result_backup = subprocess.run(
                 ssh_cmd,
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=60
             )
             
-            if result.returncode != 0:
-                print(f"⚠️  Failed to fetch remote database records: {result.stderr}")
+            if result_backup.returncode != 0:
+                print(f"⚠️  Failed to create remote backup: {result_backup.stderr}")
                 return []
             
-            # Parse JSON output from sqlite3
-            # Handle empty result (no data in time range)
-            if not result.stdout.strip():
+            # Copy backup database file via scp
+            scp_cmd = ["scp"]
+            if self.data_source.key_path:
+                scp_cmd.extend(["-i", self.data_source.key_path])
+            if ssh_port != 22:
+                scp_cmd.extend(["-P", str(ssh_port)])
+            scp_cmd.append(f"{ssh_user}@{ssh_host}:{remote_temp_db}")
+            scp_cmd.append(local_temp_db)
+            
+            print(f"📥 Copying backup database via scp...")
+            result_scp = subprocess.run(
+                scp_cmd,
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            
+            # Cleanup remote temp db regardless of scp result
+            cleanup_cmd = ["ssh"]
+            if self.data_source.key_path:
+                cleanup_cmd.extend(["-i", self.data_source.key_path])
+            if ssh_port != 22:
+                cleanup_cmd.extend(["-p", str(ssh_port)])
+            cleanup_cmd.append(f"{ssh_user}@{ssh_host}")
+            cleanup_cmd.append(f"rm -f {remote_temp_db}")
+            subprocess.run(cleanup_cmd, capture_output=True, text=True, timeout=10)
+            
+            if result_scp.returncode != 0:
+                print(f"⚠️  Failed to copy backup database: {result_scp.stderr}")
+                if os.path.exists(local_temp_db):
+                    os.remove(local_temp_db)
+                return []
+            
+            # Query local copy of database (no lock issues!)
+            conn = sqlite3.connect(local_temp_db)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            sql_query = f"SELECT * FROM raw_samples WHERE timestamp >= {start_timestamp} ORDER BY timestamp ASC"
+            print(f"� DEBUG: SQL query = {sql_query}")
+            
+            cursor.execute(sql_query)
+            rows = [dict(row) for row in cursor.fetchall()]
+            conn.close()
+            
+            # Cleanup local temp db
+            if os.path.exists(local_temp_db):
+                os.remove(local_temp_db)
+            
+            if not rows:
                 print(f"⚠️  No data found in specified time range")
                 return []
             
-            rows = json.loads(result.stdout)
-            
             print(f"✅ Retrieved {len(rows)} samples from remote Linux database")
+            print(f"🔍 DEBUG: First row timestamp = {rows[0].get('timestamp')}, Last row timestamp = {rows[-1].get('timestamp')}")
             
             # Process raw data into monitoring samples
             processed_samples = []
             prev_raw = None
             
-            for row in rows:
+            for idx, row in enumerate(rows):
                 # Reconstruct raw_data dict from database row (now a dict from JSON)
                 raw_data = {
+                    'timestamp': row['timestamp'],
                     'timestamp_ms': row.get('timestamp_ms', 0),
                     'cpu_raw': {
                         'user': row['cpu_user'],
@@ -168,7 +190,11 @@ class DataExporter:
                     'mem_total_kb': row['mem_total_kb'],
                     'mem_free_kb': row['mem_free_kb'],
                     'mem_available_kb': row['mem_available_kb'],
-                    'gpu_info': row.get('gpu_info', ''),
+                    'gpu_driver': row.get('gpu_driver', 'none'),
+                    'gpu_freq_mhz': row.get('gpu_freq_mhz', 0),
+                    'gpu_runtime_ms': row.get('gpu_runtime_ms', 0),
+                    'gpu_memory_used_bytes': row.get('gpu_memory_used_bytes', 0),
+                    'gpu_memory_total_bytes': row.get('gpu_memory_total_bytes', 0),
                     'npu_info': row.get('npu_info', ''),
                     'net_rx_bytes': row['net_rx_bytes'],
                     'net_tx_bytes': row['net_tx_bytes'],
@@ -176,10 +202,15 @@ class DataExporter:
                     'disk_write_sectors': row['disk_write_sectors']
                 }
                 
-                # Process using same logic as ssh_monitor_raw.py
-                processed = self._process_ssh_raw_data(raw_data, prev_raw, row['timestamp'])
-                if processed:
+                # For first sample, create placeholder with 0% utilizations
+                if idx == 0:
+                    processed = self._create_first_sample_ssh(raw_data, row['timestamp'])
                     processed_samples.append(processed)
+                else:
+                    # Process using same logic as ssh_monitor_raw.py
+                    processed = self._process_ssh_raw_data(raw_data, prev_raw, row['timestamp'])
+                    if processed:
+                        processed_samples.append(processed)
                 
                 prev_raw = raw_data
             
@@ -190,6 +221,40 @@ class DataExporter:
             import traceback
             traceback.print_exc()
             return []
+    
+    def _is_remote_source(self) -> bool:
+        """Determine if current data source is remote (SSH or Android)."""
+        if not self.data_source:
+            return False
+        return hasattr(self.data_source, 'ssh_host') or hasattr(self.data_source, 'device_ip')
+    def get_export_sample_count(self, use_android_db: bool = True, use_ssh_db: bool = True) -> int:
+        """Get the count of samples that will be exported.
+        
+        This is useful for UI to show the correct count before actual export.
+        
+        Args:
+            use_android_db: Whether to use Android database
+            use_ssh_db: Whether to use SSH database
+            
+        Returns:
+            Number of samples that will be exported
+        """
+        # Same logic as export functions
+        if use_ssh_db:
+            ssh_data = self._pull_ssh_db_data()
+            if ssh_data:
+                return len(ssh_data)
+        
+        if use_android_db:
+            android_data = self._pull_android_db_data()
+            if android_data:
+                return len(android_data)
+        
+        # Fallback to session_data for local sources
+        if self.session_data:
+            return len(self.session_data)
+        
+        return 0
     
     def _pull_android_db_data(self) -> List[Dict]:
         """Pull data from Android SQLite database for export.
@@ -278,7 +343,7 @@ class DataExporter:
             processed_samples = []
             prev_raw = None
             
-            for row in rows:
+            for idx, row in enumerate(rows):
                 # Reconstruct raw_data dict from database row (now a dict from JSON)
                 raw_data = {
                     'timestamp_ms': row.get('timestamp_ms', 0),  # Millisecond timestamp for GPU calc
@@ -308,10 +373,15 @@ class DataExporter:
                     'disk_write_sectors': row['disk_write_sectors']
                 }
                 
-                # Process using same logic as adb_monitor_raw.py
-                processed = self._process_android_raw_data(raw_data, prev_raw, row['timestamp'])
-                if processed:
+                # For first sample, create placeholder with 0% utilizations
+                if idx == 0:
+                    processed = self._create_first_sample_android(raw_data, row['timestamp'])
                     processed_samples.append(processed)
+                else:
+                    # Process using same logic as adb_monitor_raw.py
+                    processed = self._process_android_raw_data(raw_data, prev_raw, row['timestamp'])
+                    if processed:
+                        processed_samples.append(processed)
                 
                 prev_raw = raw_data
             
@@ -322,6 +392,107 @@ class DataExporter:
             import traceback
             traceback.print_exc()
             return []
+    
+    def _create_first_sample_android(self, raw_data: Dict, timestamp: int) -> Dict:
+        """Create first Android sample with 0% utilizations (no prev_raw for deltas).
+        
+        Args:
+            raw_data: Raw data from Android database
+            timestamp: Unix timestamp
+            
+        Returns:
+            Processed monitoring sample with zero utilizations
+        """
+        # CPU count and freq
+        cpu_count = len(raw_data['per_core_raw'])
+        per_core_freq = [freq_khz / 1000 for freq_khz in raw_data['per_core_freq_khz']]
+        avg_freq = sum(per_core_freq) / len(per_core_freq) if per_core_freq else 0
+        
+        # Memory
+        mem_total_gb = raw_data['mem_total_kb'] / 1024 / 1024
+        mem_available_gb = raw_data['mem_available_kb'] / 1024 / 1024
+        mem_free_gb = raw_data['mem_free_kb'] / 1024 / 1024
+        mem_used_gb = mem_total_gb - mem_available_gb
+        mem_percent = (mem_used_gb * 100.0 / mem_total_gb) if mem_total_gb > 0 else 0
+        
+        # GPU info
+        gpu_freq_mhz = raw_data.get('gpu_freq_mhz', 0)
+        gpu_memory_used_bytes = raw_data.get('gpu_memory_used_bytes', 0)
+        gpu_memory_total_bytes = raw_data.get('gpu_memory_total_bytes', 0)
+        gpu_available = gpu_freq_mhz > 0
+        
+        gpu_memory_used_mb = gpu_memory_used_bytes / 1024 / 1024
+        gpu_memory_total_mb = gpu_memory_total_bytes / 1024 / 1024
+        
+        # Construct monitoring sample with zero utilizations
+        sample = {
+            'timestamp': datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S'),
+            'time_seconds': timestamp,
+            'utc_timestamp': timestamp,  # Android uses UTC timestamps
+            'cpu': {
+                'cpu_count': cpu_count,
+                'physical_count': cpu_count,
+                'usage': {
+                    'total': 0.0,
+                    'per_core': [0.0] * cpu_count
+                },
+                'frequency': {
+                    'average': avg_freq,
+                    'per_core': per_core_freq
+                },
+                'temperature': {
+                    'cpu_thermal': [{
+                        'label': 'CPU',
+                        'current': raw_data['cpu_temp_millideg'] / 1000.0,
+                        'high': 95.0,
+                        'critical': 105.0
+                    }]
+                } if raw_data['cpu_temp_millideg'] > 0 else {}
+            },
+            'memory': {
+                'memory': {
+                    'total': mem_total_gb,
+                    'used': mem_used_gb,
+                    'free': mem_free_gb,
+                    'available': mem_available_gb,
+                    'percent': mem_percent,
+                    'speed': 0
+                },
+                'swap': {
+                    'total': 0,
+                    'used': 0,
+                    'free': 0,
+                    'percent': 0
+                }
+            },
+            'gpu': {
+                'available': gpu_available,
+                'gpus': [{
+                    'name': 'Adreno GPU',
+                    'gpu_clock': gpu_freq_mhz,
+                    'clock_graphics': gpu_freq_mhz,
+                    'gpu_util': 0,
+                    'memory_used': gpu_memory_used_mb,
+                    'memory_total': gpu_memory_total_mb,
+                    'memory_util': round((gpu_memory_used_mb / gpu_memory_total_mb) * 100, 1) if gpu_memory_total_mb > 0 else 0,
+                    'temperature': 0
+                }] if gpu_available else []
+            },
+            'npu': {
+                'available': False,
+                'util': 0
+            },
+            'network': {
+                'rx_MB_per_s': 0.0,
+                'tx_MB_per_s': 0.0
+            },
+            'disk': {
+                'read_MB_per_s': 0.0,
+                'write_MB_per_s': 0.0
+            }
+        }
+        
+        return sample
     
     def _process_android_raw_data(self, raw_data: Dict, prev_raw: Optional[Dict], timestamp: int) -> Optional[Dict]:
         """Process raw Android data into monitoring sample format.
@@ -482,6 +653,120 @@ class DataExporter:
             }
         }
     
+    def _create_first_sample_ssh(self, raw_data: Dict, timestamp: int) -> Dict:
+        """Create first SSH sample with 0% utilizations (no prev_raw for deltas).
+        
+        Args:
+            raw_data: Raw data from remote Linux database
+            timestamp: Unix timestamp
+            
+        Returns:
+            Processed monitoring sample with zero utilizations
+        """
+        # CPU count and freq
+        cpu_count = len(raw_data['per_core_raw'])
+        per_core_freq = [freq_khz / 1000 for freq_khz in raw_data['per_core_freq_khz']]
+        avg_freq = sum(per_core_freq) / len(per_core_freq) if per_core_freq else 0
+        
+        # Memory
+        mem_total_gb = raw_data['mem_total_kb'] / 1024 / 1024
+        mem_available_gb = raw_data['mem_available_kb'] / 1024 / 1024
+        mem_free_gb = raw_data['mem_free_kb'] / 1024 / 1024
+        mem_used_gb = mem_total_gb - mem_available_gb
+        mem_percent = (mem_used_gb * 100.0 / mem_total_gb) if mem_total_gb > 0 else 0
+        
+        # GPU info
+        gpu_driver = raw_data.get('gpu_driver', 'none')
+        gpu_freq_mhz = raw_data.get('gpu_freq_mhz', 0)
+        gpu_memory_used_bytes = raw_data.get('gpu_memory_used_bytes', 0)
+        gpu_memory_total_bytes = raw_data.get('gpu_memory_total_bytes', 0)
+        
+        # GPU is available if driver is not 'none' (freq can be 0 when idle)
+        gpu_available = gpu_driver not in ['none', '', 'N/A']
+        
+        gpu_name = 'N/A'
+        gpu_memory_used_mb = gpu_memory_used_bytes / 1024 / 1024
+        gpu_memory_total_mb = gpu_memory_total_bytes / 1024 / 1024
+        
+        if gpu_available:
+            gpu_name = f'Remote GPU ({gpu_driver.upper()})'
+        
+        # NPU info
+        npu_info_str = raw_data.get('npu_info', '')
+        npu_available = npu_info_str and npu_info_str != 'N/A'
+        
+        # Construct monitoring sample with zero utilizations
+        sample = {
+            'timestamp': datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S'),
+            'time_seconds': timestamp,
+            'cpu': {
+                'cpu_count': cpu_count,
+                'physical_count': cpu_count,
+                'usage': {
+                    'total': 0.0,
+                    'per_core': [0.0] * cpu_count
+                },
+                'frequency': {
+                    'average': avg_freq,
+                    'per_core': per_core_freq
+                },
+                'temperature': {
+                    'cpu_thermal': [{
+                        'label': 'Package id 0',
+                        'current': raw_data['cpu_temp_millideg'] / 1000.0,
+                        'high': 100.0,
+                        'critical': 105.0
+                    }]
+                } if raw_data['cpu_temp_millideg'] > 0 else {}
+            },
+            'memory': {
+                'memory': {
+                    'total': mem_total_gb,
+                    'used': mem_used_gb,
+                    'free': mem_free_gb,
+                    'available': mem_available_gb,
+                    'percent': mem_percent,
+                    'speed': 0
+                },
+                'swap': {
+                    'total': 0,
+                    'used': 0,
+                    'free': 0,
+                    'percent': 0
+                }
+            },
+            'gpu': {
+                'available': gpu_available,
+                'gpus': [{
+                    'name': gpu_name,
+                    'gpu_clock': gpu_freq_mhz,
+                    'clock_graphics': gpu_freq_mhz,
+                    'gpu_util': 0,
+                    'memory_used': gpu_memory_used_mb,
+                    'memory_total': gpu_memory_total_mb,
+                    'memory_util': round((gpu_memory_used_mb / gpu_memory_total_mb) * 100, 1) if gpu_memory_total_mb > 0 else 0,
+                    'temperature': 0
+                }] if gpu_available else []
+            },
+            'npu': {
+                'available': npu_available,
+                'npus': [{
+                    'name': 'Intel NPU',
+                    'npu_util': 0
+                }] if npu_available else []
+            },
+            'network': {
+                'rx_MB_per_s': 0.0,
+                'tx_MB_per_s': 0.0
+            },
+            'disk': {
+                'read_MB_per_s': 0.0,
+                'write_MB_per_s': 0.0
+            }
+        }
+        
+        return sample
+    
     def _process_ssh_raw_data(self, raw_data: Dict, prev_raw: Optional[Dict], timestamp: int) -> Optional[Dict]:
         """Process raw SSH/Linux data into monitoring sample format.
         
@@ -522,29 +807,37 @@ class DataExporter:
         mem_used_gb = mem_total_gb - mem_available_gb
         mem_percent = (mem_used_gb * 100.0 / mem_total_gb) if mem_total_gb > 0 else 0
         
-        # Parse GPU info (format: "driver:id:name:freq:util:memory")
-        gpu_info_str = raw_data.get('gpu_info', '')
-        gpu_available = False
-        gpu_name = 'N/A'
-        gpu_freq_mhz = 0
-        gpu_util = 0
-        gpu_memory_used_mb = 0
-        gpu_memory_total_mb = 0
+        # GPU info (new schema: individual fields)
+        gpu_driver = raw_data.get('gpu_driver', 'none')
+        gpu_freq_mhz = raw_data.get('gpu_freq_mhz', 0)
+        gpu_runtime_ms = raw_data.get('gpu_runtime_ms', 0)
+        gpu_memory_used_bytes = raw_data.get('gpu_memory_used_bytes', 0)
+        gpu_memory_total_bytes = raw_data.get('gpu_memory_total_bytes', 0)
         
-        if gpu_info_str and gpu_info_str != 'N/A':
-            parts = gpu_info_str.split(':')
-            if len(parts) >= 6:
-                gpu_driver = parts[0]  # intel-xe or intel-i915 or nvidia
-                gpu_id = parts[1]
-                gpu_name = parts[2]
-                gpu_freq_mhz = int(parts[3])
-                gpu_util = int(parts[4])
-                gpu_memory_used_mb = int(parts[5])
-                gpu_available = True
-                
-                # Memory total might be in part 6
-                if len(parts) >= 7:
-                    gpu_memory_total_mb = int(parts[6])
+        prev_gpu_runtime_ms = prev_raw.get('gpu_runtime_ms', 0)
+        
+        # GPU is available if driver is not 'none' (freq can be 0 when GPU is idle)
+        gpu_available = gpu_driver not in ['none', '', 'N/A']
+        gpu_name = 'N/A'
+        gpu_util = 0
+        gpu_memory_used_mb = gpu_memory_used_bytes / 1024 / 1024
+        gpu_memory_total_mb = gpu_memory_total_bytes / 1024 / 1024
+        
+        if gpu_available:
+            # Use same naming as ssh_monitor_raw.py
+            gpu_name = f'Remote GPU ({gpu_driver.upper()})'
+            
+            # Calculate GPU utilization from runtime delta
+            # gpu_runtime_ms is idle_residency_ms (Xe) or rc6_residency_ms (i915)
+            prev_timestamp = prev_raw.get('timestamp', timestamp)
+            time_delta_ms = (timestamp - prev_timestamp) * 1000  # Convert to milliseconds
+            
+            if time_delta_ms > 0 and gpu_runtime_ms >= prev_gpu_runtime_ms:
+                runtime_delta = gpu_runtime_ms - prev_gpu_runtime_ms
+                # Utilization = 100 - (idle_time / total_time * 100)
+                gpu_util = int(max(0, min(100, 100 - (runtime_delta / time_delta_ms * 100))))
+            else:
+                gpu_util = 0
         
         # Parse NPU info (format: "driver:id:device_id:product_id:util")
         npu_info_str = raw_data.get('npu_info', '')
@@ -697,21 +990,30 @@ class DataExporter:
         
         filepath = self.output_dir / filename
         
-        # Try to use remote database if available and requested
-        export_data = self.session_data
+        # For remote sources (SSH/Android), ONLY use remote database
+        # Do NOT mix with session_data (host-side streaming data)
+        export_data = None
         
-        # Priority: SSH DB > Android DB > Session data
+        # Priority: SSH DB > Android DB > Session data (local only)
         if use_ssh_db:
             ssh_data = self._pull_ssh_db_data()
             if ssh_data:
                 export_data = ssh_data
                 print(f"📊 Exporting {len(export_data)} samples from remote Linux database")
         
-        if use_android_db and export_data == self.session_data:  # Only if SSH didn't provide data
+        if use_android_db and export_data is None:  # Only if SSH didn't provide data
             android_data = self._pull_android_db_data()
             if android_data:
                 export_data = android_data
                 print(f"📊 Exporting {len(export_data)} samples from Android database")
+        
+        # Fallback to session_data only for true local sources
+        if export_data is None:
+            if self._is_remote_source():
+                raise ValueError("Remote data source has no database samples available for export")
+            export_data = self.session_data
+            if export_data:
+                print(f"📊 Exporting {len(export_data)} samples from session data (local source)")
         
         if not export_data:
             raise ValueError("No data to export")
@@ -750,21 +1052,30 @@ class DataExporter:
         
         filepath = self.output_dir / filename
         
-        # Try to use remote database if available and requested
-        export_samples = self.session_data
+        # For remote sources (SSH/Android), ONLY use remote database
+        # Do NOT mix with session_data (host-side streaming data)
+        export_samples = None
         
-        # Priority: SSH DB > Android DB > Session data
+        # Priority: SSH DB > Android DB > Session data (local only)
         if use_ssh_db:
             ssh_data = self._pull_ssh_db_data()
             if ssh_data:
                 export_samples = ssh_data
                 print(f"📊 Exporting {len(export_samples)} samples from remote Linux database")
         
-        if use_android_db and export_samples == self.session_data:  # Only if SSH didn't provide data
+        if use_android_db and export_samples is None:  # Only if SSH didn't provide data
             android_data = self._pull_android_db_data()
             if android_data:
                 export_samples = android_data
                 print(f"📊 Exporting {len(export_samples)} samples from Android database")
+        
+        # Fallback to session data only for local sources
+        if export_samples is None:
+            if self._is_remote_source():
+                raise ValueError("Remote data source has no database samples available for export")
+            export_samples = self.session_data
+            if export_samples:
+                print(f"📊 Exporting {len(export_samples)} samples from session data (local source)")
         
         if not export_samples:
             raise ValueError("No data to export")
@@ -805,21 +1116,30 @@ class DataExporter:
         
         filepath = self.output_dir / filename
         
-        # Try to use remote database if available and requested
-        export_samples = self.session_data
+        # For remote sources (SSH/Android), ONLY use remote database
+        # Do NOT mix with session_data (host-side streaming data)
+        export_samples = None
         
-        # Priority: SSH DB > Android DB > Session data
+        # Priority: SSH DB > Android DB > Session data (local only)
         if use_ssh_db:
             ssh_data = self._pull_ssh_db_data()
             if ssh_data:
                 export_samples = ssh_data
                 print(f"📊 Exporting {len(export_samples)} samples from remote Linux database")
         
-        if use_android_db and export_samples == self.session_data:  # Only if SSH didn't provide data
+        if use_android_db and export_samples is None:  # Only if SSH didn't provide data
             android_data = self._pull_android_db_data()
             if android_data:
                 export_samples = android_data
                 print(f"📊 Exporting {len(export_samples)} samples from Android database")
+        
+        # Fallback to session data only for local sources
+        if export_samples is None:
+            if self._is_remote_source():
+                raise ValueError("Remote data source has no database samples available for export")
+            export_samples = self.session_data
+            if export_samples:
+                print(f"📊 Exporting {len(export_samples)} samples from session data (local source)")
         
         if not export_samples:
             raise ValueError("No data to export")

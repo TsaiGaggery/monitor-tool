@@ -7,9 +7,7 @@
 INTERVAL=${1:-1}
 DB_PATH="/tmp/monitor_tool_${USER}.db"
 
-# Previous values for delta calculation (host-side)
-PREV_XE_IDLE_MS=0
-PREV_I915_RC6_MS=0
+# Previous values for delta calculation (only for NPU, GPU calculation moved to host)
 PREV_NPU_BUSY_US=0
 PREV_TIMESTAMP_MS=0
 FIRST_SAMPLE=true
@@ -35,7 +33,11 @@ CREATE TABLE IF NOT EXISTS raw_samples (
     mem_total_kb INTEGER,
     mem_free_kb INTEGER,
     mem_available_kb INTEGER,
-    gpu_info TEXT,
+    gpu_driver TEXT,
+    gpu_freq_mhz INTEGER,
+    gpu_runtime_ms INTEGER,
+    gpu_memory_used_bytes INTEGER,
+    gpu_memory_total_bytes INTEGER,
     npu_info TEXT,
     net_rx_bytes INTEGER,
     net_tx_bytes INTEGER,
@@ -103,19 +105,14 @@ get_memory_raw() {
     echo "$mem_total $mem_free $mem_available"
 }
 
-# Get GPU info (NVIDIA or Intel)
+# Get GPU runtime (raw idle/rc6 residency for host-side calculation)
+# Returns: driver freq_mhz runtime_ms mem_used_bytes mem_total_bytes
+# For Xe: runtime_ms is idle_residency_ms (host will calculate util = 100 - idle%)
+# For i915: runtime_ms is rc6_residency_ms (host will calculate util = 100 - rc6%)
 get_gpu_info() {
-    local current_ts_ms=$1  # Pass current timestamp for delta calculation
     
-    # Try NVIDIA first
-    if command -v nvidia-smi >/dev/null 2>&1; then
-        nvidia_info=$(nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,clocks.gr --format=csv,noheader,nounits 2>/dev/null | head -1)
-        if [ -n "$nvidia_info" ]; then
-            # NVIDIA reports utilization directly
-            echo "nvidia:$nvidia_info"
-            return
-        fi
-    fi
+    # Try NVIDIA first (not implemented yet, would need raw counter)
+    # TODO: NVIDIA support for raw counters
     
     # Check for Intel GPU (i915 or Xe)
     for card in /sys/class/drm/card[0-9]; do
@@ -141,54 +138,36 @@ get_gpu_info() {
                 
                 # Check for Xe driver (has tile0/gt0 structure)
                 xe_idle_path="/sys/class/drm/card${card_num}/device/tile0/gt0/gtidle/idle_residency_ms"
-                xe_freq_path="/sys/class/drm/card${card_num}/device/tile0/gt0/freq0/act_freq"
-                xe_freq_cur_path="/sys/class/drm/card${card_num}/device/tile0/gt0/freq0/cur_freq"
                 
                 if [ -f "$xe_idle_path" ]; then
-                    # Intel Xe GPU
+                    # Intel Xe GPU - return RAW idle_residency_ms
                     xe_idle=$(cat "$xe_idle_path" 2>/dev/null || echo "0")
-                    # Only use act_freq (actual frequency), not cur_freq
-                    xe_freq=$(cat "$xe_freq_path" 2>/dev/null || echo "0")
-                    # Note: If act_freq returns 0, it means driver doesn't support it
-                    # We intentionally show 0 instead of falling back to cur_freq
-
                     
-                    # Get memory from fdinfo (approximate) - DISABLED: too slow
-                    # Scanning all /proc/*/fdinfo/* takes too long (thousands of files)
-                    mem_used=0
-                    # for fd in /proc/*/fdinfo/*; do
-                    #     if [ -f "$fd" ] && grep -q "drm-memory-vram" "$fd" 2>/dev/null; then
-                    #         mem=$(grep "drm-memory-vram" "$fd" | awk '{print $2}')
-                    #         mem_used=$((mem_used + mem))
-                    #     fi
-                    # done
-                    mem_used_mb=$((mem_used / 1024))  # KB to MB
-                    
-                    # Calculate utilization on host
-                    gpu_util=0
-                    if [ "$FIRST_SAMPLE" = false ] && [ "$PREV_TIMESTAMP_MS" -gt 0 ]; then
-                        time_delta=$((current_ts_ms - PREV_TIMESTAMP_MS))
-                        idle_delta=$((xe_idle - PREV_XE_IDLE_MS))
-                        
-                        if [ "$time_delta" -gt 0 ]; then
-                            # Clamp idle_delta to time_delta
-                            if [ "$idle_delta" -gt "$time_delta" ]; then
-                                idle_delta=$time_delta
+                    # Read frequency from all GT units and use maximum
+                    xe_freq=0
+                    for gt_freq in /sys/class/drm/card${card_num}/device/tile0/gt*/freq0/act_freq; do
+                        if [ -f "$gt_freq" ]; then
+                            freq=$(cat "$gt_freq" 2>/dev/null || echo "0")
+                            if [ "$freq" -gt "$xe_freq" ]; then
+                                xe_freq=$freq
                             fi
-                            
-                            # Utilization = 100 - (idle_percentage) using awk for float math
-                            gpu_util=$(awk "BEGIN {printf \"%.0f\", 100 - ($idle_delta * 100.0 / $time_delta)}")
-                            
-                            # Clamp to 0-100
-                            if [ "$gpu_util" -lt 0 ]; then gpu_util=0; fi
-                            if [ "$gpu_util" -gt 100 ]; then gpu_util=100; fi
                         fi
-                    fi
+                    done
                     
-                    PREV_XE_IDLE_MS=$xe_idle
+                    # Get GPU memory usage
+                    # Note: For integrated GPUs, accurate memory tracking is not available
+                    # Per-process fdinfo values are VIRTUAL addresses and summing them
+                    # leads to massive over-counting due to shared buffers
+                    # System-wide metrics are not exposed by Xe driver
+                    # Best we can do: report 0 (memory is shared with system RAM)
+                    mem_used_bytes=0
                     
-                    # Output format: type:card_num:name:util:freq_mhz:mem_used_mb
-                    echo "intel-xe:${card_num}:${gpu_name}:${gpu_util}:${xe_freq}:${mem_used_mb}"
+                    # Get total system memory (integrated GPU uses system RAM)
+                    mem_total_kb=$(grep "^MemTotal:" /proc/meminfo 2>/dev/null | awk '{print $2}')
+                    mem_total_bytes=$((mem_total_kb * 1024))
+                    
+                    # Return: driver freq_mhz runtime_ms mem_used_bytes mem_total_bytes
+                    echo "xe ${xe_freq} ${xe_idle} ${mem_used_bytes} ${mem_total_bytes}"
                     return
                 fi
                 
@@ -197,52 +176,32 @@ get_gpu_info() {
                 i915_freq_path="/sys/class/drm/card${card_num}/gt_cur_freq_mhz"
                 
                 if [ -f "$i915_rc6_path" ]; then
-                    # Intel i915 GPU
+                    # Intel i915 GPU - return RAW rc6_residency_ms
                     i915_rc6=$(cat "$i915_rc6_path" 2>/dev/null || echo "0")
                     i915_freq=$(cat "$i915_freq_path" 2>/dev/null || echo "0")
                     
-                    # Get memory from i915_gem_objects (if accessible)
-                    mem_used_mb=0
-                    gem_path="/sys/kernel/debug/dri/${card_num}/i915_gem_objects"
-                    if [ -f "$gem_path" ]; then
-                        mem_bytes=$(grep "Total" "$gem_path" 2>/dev/null | grep -o '[0-9]* bytes' | grep -o '[0-9]*' | head -1)
-                        if [ -n "$mem_bytes" ]; then
-                            mem_used_mb=$((mem_bytes / 1024 / 1024))
-                        fi
-                    fi
+                    # Get GPU memory usage
+                    # Note: For integrated GPUs, accurate memory tracking is not available
+                    # Per-process fdinfo values are VIRTUAL addresses and summing them
+                    # leads to massive over-counting due to shared buffers
+                    # System-wide metrics are not exposed by i915 driver for integrated GPUs
+                    # Best we can do: report 0 (memory is shared with system RAM)
+                    mem_used_bytes=0
                     
-                    # Calculate utilization on host
-                    gpu_util=0
-                    if [ "$FIRST_SAMPLE" = false ] && [ "$PREV_TIMESTAMP_MS" -gt 0 ]; then
-                        time_delta=$((current_ts_ms - PREV_TIMESTAMP_MS))
-                        rc6_delta=$((i915_rc6 - PREV_I915_RC6_MS))
-                        
-                        if [ "$time_delta" -gt 0 ]; then
-                            # Clamp rc6_delta to time_delta
-                            if [ "$rc6_delta" -gt "$time_delta" ]; then
-                                rc6_delta=$time_delta
-                            fi
-                            
-                            # Utilization = 100 - (rc6_percentage) using awk for float math
-                            gpu_util=$(awk "BEGIN {printf \"%.0f\", 100 - ($rc6_delta * 100.0 / $time_delta)}")
-                            
-                            # Clamp to 0-100
-                            if [ "$gpu_util" -lt 0 ]; then gpu_util=0; fi
-                            if [ "$gpu_util" -gt 100 ]; then gpu_util=100; fi
-                        fi
-                    fi
+                    # Get total system memory (integrated GPU uses system RAM)
+                    mem_total_kb=$(grep "^MemTotal:" /proc/meminfo 2>/dev/null | awk '{print $2}')
+                    mem_total_bytes=$((mem_total_kb * 1024))
                     
-                    PREV_I915_RC6_MS=$i915_rc6
-                    
-                    # Output format: type:card_num:name:util:freq_mhz:mem_used_mb
-                    echo "intel-i915:${card_num}:${gpu_name}:${gpu_util}:${i915_freq}:${mem_used_mb}"
+                    # Return: driver freq_mhz runtime_ms mem_used_bytes mem_total_bytes
+                    echo "i915 ${i915_freq} ${i915_rc6} ${mem_used_bytes} ${mem_total_bytes}"
                     return
                 fi
             fi
         fi
     done
     
-    echo "none"
+    # No GPU found
+    echo "none 0 0 0 0"
 }
 
 # Get NPU info (Intel NPU/VPU)
@@ -360,7 +319,7 @@ main() {
     init_database 2>&2
     
     while true; do
-        LOOP_START=$(date +%s)
+        LOOP_START=$(date +%s%3N)
         
         # Collect all raw data
         # Get timestamps FIRST for accurate delta calculations
@@ -374,22 +333,11 @@ main() {
         
         read mem_total mem_free mem_available <<< $(get_memory_raw)
         
-        # GPU/NPU info - must call directly (not in subshell) to update PREV_* globals
-        gpu_info=$(get_gpu_info "$TIMESTAMP_MS")
+        # GPU/NPU info
+        read gpu_driver gpu_freq gpu_runtime gpu_mem_used gpu_mem_total <<< $(get_gpu_info)
         npu_info=$(get_npu_info "$TIMESTAMP_MS")
         
-        # Update global PREV_* variables after getting GPU/NPU info
-        # Extract current values and save for next iteration
-        if [[ "$gpu_info" == intel-xe:* ]]; then
-            # Parse: intel-xe:card:name:util:freq:mem
-            # Save current idle value for next delta calculation
-            xe_idle=$(cat /sys/class/drm/card1/device/tile0/gt0/gtidle/idle_residency_ms 2>/dev/null || echo "0")
-            PREV_XE_IDLE_MS=$xe_idle
-        elif [[ "$gpu_info" == intel-i915:* ]]; then
-            i915_rc6=$(cat /sys/class/drm/card0/gt/gt0/rc6_residency_ms 2>/dev/null || echo "0")
-            PREV_I915_RC6_MS=$i915_rc6
-        fi
-        
+        # Only update PREV_NPU_BUSY_US as NPU still calculates on remote
         if [[ "$npu_info" == intel-npu:* ]]; then
             npu_busy=$(cat /sys/class/accel/accel0/device/npu_busy_time_us 2>/dev/null || echo "0")
             PREV_NPU_BUSY_US=$npu_busy
@@ -402,25 +350,32 @@ main() {
         PREV_TIMESTAMP_MS=$TIMESTAMP_MS
         FIRST_SAMPLE=false
         
-        # Insert into SQLite database on target device (redirect to stderr to avoid mixing with JSON stdout)
-        sqlite3 "$DB_PATH" "INSERT INTO raw_samples (timestamp, timestamp_ms, cpu_user, cpu_nice, cpu_sys, cpu_idle, cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz, cpu_temp_millideg, mem_total_kb, mem_free_kb, mem_available_kb, gpu_info, npu_info, net_rx_bytes, net_tx_bytes, disk_read_sectors, disk_write_sectors) VALUES ($TIMESTAMP, $TIMESTAMP_MS, $cpu_user, $cpu_nice, $cpu_sys, $cpu_idle, $cpu_iowait, $cpu_irq, $cpu_softirq, $cpu_steal, '$per_core_stats', '$per_core_freq', $cpu_temp, $mem_total, $mem_free, $mem_available, '$gpu_info', '$npu_info', $net_rx, $net_tx, $disk_read, $disk_write);" 2>&2
+        # Insert into SQLite database on target device
+        # Log every write attempt so we can trace timestamps
+        echo "[$(date '+%F %T')] INSERT timestamp=$TIMESTAMP runtime_ms=$gpu_runtime mem_used=$gpu_mem_used" >> /tmp/monitor_db_writes.log
+        # Check for errors and log to file for debugging
+        if ! sqlite3 "$DB_PATH" "INSERT INTO raw_samples (timestamp, timestamp_ms, cpu_user, cpu_nice, cpu_sys, cpu_idle, cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz, cpu_temp_millideg, mem_total_kb, mem_free_kb, mem_available_kb, gpu_driver, gpu_freq_mhz, gpu_runtime_ms, gpu_memory_used_bytes, gpu_memory_total_bytes, npu_info, net_rx_bytes, net_tx_bytes, disk_read_sectors, disk_write_sectors) VALUES ($TIMESTAMP, $TIMESTAMP_MS, $cpu_user, $cpu_nice, $cpu_sys, $cpu_idle, $cpu_iowait, $cpu_irq, $cpu_softirq, $cpu_steal, '$per_core_stats', '$per_core_freq', $cpu_temp, $mem_total, $mem_free, $mem_available, '$gpu_driver', $gpu_freq, $gpu_runtime, $gpu_mem_used, $gpu_mem_total, '$npu_info', $net_rx, $net_tx, $disk_read, $disk_write);" 2>>/tmp/monitor_db_errors.log; then
+            echo "[$(date)] DB INSERT failed at timestamp $TIMESTAMP" >> /tmp/monitor_db_errors.log
+        fi
         
         # Output JSON to stdout (for SSH streaming to host)
-        printf '{"timestamp_ms":%s,"cpu_raw":{"user":%d,"nice":%d,"sys":%d,"idle":%d,"iowait":%d,"irq":%d,"softirq":%d,"steal":%d},"per_core_raw":[%s],"per_core_freq_khz":[%s],"cpu_temp_millideg":%d,"mem_total_kb":%d,"mem_free_kb":%d,"mem_available_kb":%d,"gpu_info":"%s","npu_info":"%s","net_rx_bytes":%d,"net_tx_bytes":%d,"disk_read_sectors":%d,"disk_write_sectors":%d}\n' \
+        # Send RAW gpu_runtime_ms AND timestamp_ms for accurate host-side calculation
+        printf '{"timestamp_ms":%s,"cpu_raw":{"user":%d,"nice":%d,"sys":%d,"idle":%d,"iowait":%d,"irq":%d,"softirq":%d,"steal":%d},"per_core_raw":[%s],"per_core_freq_khz":[%s],"cpu_temp_millideg":%d,"mem_total_kb":%d,"mem_free_kb":%d,"mem_available_kb":%d,"gpu_driver":"%s","gpu_freq_mhz":%d,"gpu_runtime_ms":%d,"gpu_memory_used_bytes":%d,"gpu_memory_total_bytes":%d,"npu_info":"%s","net_rx_bytes":%d,"net_tx_bytes":%d,"disk_read_sectors":%d,"disk_write_sectors":%d}\n' \
             "$TIMESTAMP_MS" \
             "$cpu_user" "$cpu_nice" "$cpu_sys" "$cpu_idle" "$cpu_iowait" "$cpu_irq" "$cpu_softirq" "$cpu_steal" \
             "$per_core_stats" "$per_core_freq" "$cpu_temp" \
             "$mem_total" "$mem_free" "$mem_available" \
-            "$gpu_info" "$npu_info" \
+            "$gpu_driver" "$gpu_freq" "$gpu_runtime" "$gpu_mem_used" "$gpu_mem_total" \
+            "$npu_info" \
             "$net_rx" "$net_tx" \
             "$disk_read" "$disk_write"
         
         # Sleep until next interval
-        LOOP_END=$(date +%s)
+        LOOP_END=$(date +%s%3N)
         ELAPSED=$((LOOP_END - LOOP_START))
-        SLEEP_TIME=$((INTERVAL - ELAPSED))
+        SLEEP_TIME=$((INTERVAL * 1000 - ELAPSED))
         if [ "$SLEEP_TIME" -gt 0 ]; then
-            sleep "$SLEEP_TIME"
+            sleep $(awk "BEGIN {print $SLEEP_TIME/1000}")
         fi
     done
 }

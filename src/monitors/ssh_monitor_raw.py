@@ -9,6 +9,7 @@ import threading
 import time
 import paramiko
 from typing import Optional, Dict, Any, Callable
+from queue import Queue
 import os
 
 
@@ -46,8 +47,15 @@ class SSHMonitorRaw:
         self._stdout = None
         self._stderr = None
         
+        # Use a queue to buffer samples instead of just storing "latest"
+        # This prevents sample loss when UI polls slower than data arrives
+        self._sample_queue: Queue = Queue(maxsize=100)  # Buffer up to 100 samples
         self._latest_raw_data: Optional[Dict[str, Any]] = None
         self._prev_raw_data: Optional[Dict[str, Any]] = None  # For delta calculation
+        
+        # Previous GPU runtime for utilization calculation (host-side)
+        self._prev_gpu_runtime_ms: Optional[int] = None
+        self._prev_gpu_timestamp_ms: Optional[int] = None
         self._data_callback: Optional[Callable] = None
         self._lock = threading.Lock()
         
@@ -269,78 +277,75 @@ class SSHMonitorRaw:
             # Update stored data
             self._prev_raw_data = self._latest_raw_data
             self._latest_raw_data = raw_data
+            
+            # Add to queue for UI consumption (non-blocking)
+            try:
+                self._sample_queue.put_nowait(raw_data)
+            except:
+                # Queue full, drop oldest sample and retry
+                try:
+                    self._sample_queue.get_nowait()  # Remove oldest
+                    self._sample_queue.put_nowait(raw_data)  # Add new
+                except:
+                    pass  # If still fails, just drop this sample
         
         # Call callback if registered
         if self._data_callback:
             self._data_callback(raw_data)
     
     def _calculate_gpu_info(self, raw_data: Dict[str, Any], prev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Parse GPU info from remote (utilization already calculated on host)"""
-        gpu_info_str = raw_data.get('gpu_info', '')
-        if not gpu_info_str or gpu_info_str == 'none':
+        """Calculate GPU utilization from raw runtime/idle delta (host-side calculation)
+        
+        Similar to adb_monitor_raw.py approach:
+        - Remote sends RAW gpu_runtime_ms (idle_residency or rc6_residency)
+        - Host calculates utilization from delta between samples
+        """
+        gpu_driver = raw_data.get('gpu_driver', 'none')
+        if gpu_driver == 'none':
             return {'available': False}
         
-        # Parse Intel Xe GPU info
-        if gpu_info_str.startswith('intel-xe:'):
-            # Format: intel-xe:card_num:name:util:freq_mhz:mem_used_mb (util calculated on host)
-            parts = gpu_info_str.split(':')
-            if len(parts) >= 6:
-                card_num = int(parts[1])
-                gpu_name = parts[2]
-                utilization = int(parts[3])  # Already calculated on host
-                freq_mhz = int(parts[4])
-                mem_mb = int(parts[5])
-                
-                return {
-                    'available': True,
-                    'name': gpu_name,
-                    'gpu_util': utilization,
-                    'gpu_clock': freq_mhz,
-                    'memory_used': mem_mb,
-                    'temperature': 0
-                }
+        gpu_freq_mhz = raw_data.get('gpu_freq_mhz', 0)
+        gpu_runtime_ms = raw_data.get('gpu_runtime_ms', 0)
+        timestamp_ms = raw_data.get('timestamp_ms', 0)
         
-        # Parse Intel i915 GPU info
-        elif gpu_info_str.startswith('intel-i915:'):
-            # Format: intel-i915:card_num:name:util:freq_mhz:mem_used_mb (util calculated on host)
-            parts = gpu_info_str.split(':')
-            if len(parts) >= 6:
-                card_num = int(parts[1])
-                gpu_name = parts[2]
-                utilization = int(parts[3])  # Already calculated on host
-                freq_mhz = int(parts[4])
-                mem_mb = int(parts[5])
-                
-                return {
-                    'available': True,
-                    'name': gpu_name,
-                    'gpu_util': utilization,
-                    'gpu_clock': freq_mhz,
-                    'memory_used': mem_mb,
-                    'temperature': 0
-                }
+        # Calculate GPU utilization from runtime delta
+        gpu_util = 0
+        if self._prev_gpu_runtime_ms is not None and self._prev_gpu_timestamp_ms is not None:
+            runtime_delta = gpu_runtime_ms - self._prev_gpu_runtime_ms
+            time_delta = timestamp_ms - self._prev_gpu_timestamp_ms
+            
+            if time_delta > 0:
+                if gpu_driver == 'xe':
+                    # For Xe: runtime_ms is idle_residency_ms
+                    # Utilization = 100 - (idle_delta / time_delta * 100)
+                    idle_percentage = (runtime_delta / time_delta) * 100
+                    gpu_util = int(max(0, min(100, 100 - idle_percentage)))
+                elif gpu_driver == 'i915':
+                    # For i915: runtime_ms is rc6_residency_ms (idle time)
+                    # Utilization = 100 - (rc6_delta / time_delta * 100)
+                    idle_percentage = (runtime_delta / time_delta) * 100
+                    gpu_util = int(max(0, min(100, 100 - idle_percentage)))
+                # TODO: NVIDIA support would need different calculation
         
-        # Parse NVIDIA GPU info
-        elif gpu_info_str.startswith('nvidia:'):
-            # Format: nvidia:gpu_id:name:util:temp:mem_used:mem_total:freq
-            parts = gpu_info_str.split(':')
-            if len(parts) >= 8:
-                gpu_name = parts[2]
-                utilization = int(parts[3])
-                temp = int(parts[4])
-                mem_used = int(parts[5])
-                freq_mhz = int(parts[7])
-                
-                return {
-                    'available': True,
-                    'name': gpu_name,
-                    'gpu_util': utilization,
-                    'gpu_clock': freq_mhz,
-                    'memory_used': mem_used,
-                    'temperature': temp
-                }
+        # Update previous values for next calculation
+        self._prev_gpu_runtime_ms = gpu_runtime_ms
+        self._prev_gpu_timestamp_ms = timestamp_ms
         
-        return {'available': False}
+        # GPU memory
+        gpu_mem_used_bytes = raw_data.get('gpu_memory_used_bytes', 0)
+        gpu_mem_total_bytes = raw_data.get('gpu_memory_total_bytes', 0)
+        gpu_mem_used_mb = gpu_mem_used_bytes // (1024 * 1024)
+        gpu_mem_total_mb = gpu_mem_total_bytes // (1024 * 1024)
+        
+        return {
+            'available': gpu_driver not in ['none', '', 'N/A'],  # Check driver, not freq (freq can be 0 when idle)
+            'name': f'Remote GPU ({gpu_driver.upper()})',
+            'gpu_util': gpu_util,  # Calculated on host from runtime delta
+            'gpu_clock': gpu_freq_mhz,
+            'memory_used': gpu_mem_used_mb,
+            'memory_total': gpu_mem_total_mb,
+            'temperature': 0
+        }
     
     def _calculate_npu_info(self, raw_data: Dict[str, Any], prev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Parse NPU info from remote (utilization already calculated on host)"""
@@ -384,6 +389,20 @@ class SSHMonitorRaw:
         """Get latest monitoring data"""
         with self._lock:
             return self._latest_raw_data
+    
+    def get_queued_samples(self) -> list[Dict[str, Any]]:
+        """Get all queued samples (for UI to process without loss)
+        
+        Returns:
+            List of all samples currently in the queue
+        """
+        samples = []
+        while not self._sample_queue.empty():
+            try:
+                samples.append(self._sample_queue.get_nowait())
+            except:
+                break
+        return samples
     
     def stop_monitoring(self):
         """Stop monitoring"""

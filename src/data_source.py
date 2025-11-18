@@ -379,6 +379,7 @@ class RemoteLinuxDataSource(MonitorDataSource):
         )
         
         self._connected = False
+        self.session_start_time = None  # Track when monitoring session started
         
         # Previous values for delta calculations (use separate timestamps for different metrics)
         self._prev_cpu_raw = None
@@ -398,7 +399,20 @@ class RemoteLinuxDataSource(MonitorDataSource):
             # Wait for initial data to arrive (actively poll for up to 5 seconds)
             for _ in range(50):  # 50 * 0.1s = 5s max
                 time.sleep(0.1)
-                if self.ssh_monitor.get_latest_data():
+                first_data = self.ssh_monitor.get_latest_data()
+                if first_data:
+                    # Record session start time from REMOTE timestamp, not local wall-clock
+                    # This ensures session_start_time matches the first DB sample timestamp
+                    from datetime import datetime
+                    if self.session_start_time is None:
+                        # Use remote timestamp from first sample (seconds precision)
+                        remote_ts = first_data.get('timestamp_ms', 0) // 1000
+                        if remote_ts > 0:
+                            self.session_start_time = datetime.fromtimestamp(remote_ts)
+                        else:
+                            # Fallback to local time if no remote timestamp
+                            self.session_start_time = datetime.now()
+                    
                     # Data received, wait a bit more for GPU/NPU detection
                     time.sleep(2.0)
                     break
@@ -414,6 +428,20 @@ class RemoteLinuxDataSource(MonitorDataSource):
     def is_connected(self) -> bool:
         """Check if connected."""
         return self._connected
+    
+    def process_queued_samples(self):
+        """Process all queued samples from SSH monitor to prevent data loss.
+        
+        This should be called before reading data to ensure all samples
+        from the remote stream have been processed. Returns the list of
+        samples for the UI to process individually.
+        
+        Returns:
+            List of queued samples to process
+        """
+        if hasattr(self.ssh_monitor, 'get_queued_samples'):
+            return self.ssh_monitor.get_queued_samples()
+        return []
     
     def get_cpu_info(self) -> Dict:
         """Get CPU information from remote system."""
@@ -598,20 +626,20 @@ class RemoteLinuxDataSource(MonitorDataSource):
         
         net_rx = raw_data.get('net_rx_bytes', 0)
         net_tx = raw_data.get('net_tx_bytes', 0)
-        current_time = time.time()
+        timestamp_ms = raw_data.get('timestamp_ms', 0)  # Use REMOTE timestamp, not local time
         
         # Calculate speeds
         upload_speed = 0.0
         download_speed = 0.0
         
-        if self._prev_net_bytes and self._prev_time:
-            time_delta = current_time - self._prev_time
+        if self._prev_net_bytes and self._prev_net_time:
+            time_delta = (timestamp_ms - self._prev_net_time) / 1000.0  # Convert ms to seconds
             if time_delta > 0:
                 download_speed = (net_rx - self._prev_net_bytes[0]) / time_delta
                 upload_speed = (net_tx - self._prev_net_bytes[1]) / time_delta
         
         self._prev_net_bytes = (net_rx, net_tx)
-        self._prev_time = current_time
+        self._prev_net_time = timestamp_ms  # Store remote timestamp in milliseconds
         
         return {
             'upload_speed': upload_speed,
