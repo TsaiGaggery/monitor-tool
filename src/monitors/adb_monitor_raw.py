@@ -32,6 +32,7 @@ class ADBMonitorRaw:
         self._cpu_info = self._empty_cpu_info()
         self._memory_info = self._empty_memory_info()
         self._gpu_info = self._empty_gpu_info()
+        self._npu_info = self._empty_npu_info()
         self._network_info = self._empty_network_info()
         self._disk_info = self._empty_disk_info()
         
@@ -296,6 +297,27 @@ class ADBMonitorRaw:
             # Save for next delta calculation
             self._latest_raw_data = raw_data
             self._previous_raw_data = raw_data
+            
+            # NPU info (parse from npu_info field, similar to SSH monitor)
+            npu_info_str = raw_data.get('npu_info', 'none')
+            if npu_info_str and npu_info_str != 'none':
+                # Parse Intel NPU info (format: intel-npu:freq_mhz:max_freq_mhz:mem_mb:util)
+                if npu_info_str.startswith('intel-npu:'):
+                    parts = npu_info_str.split(':')
+                    if len(parts) >= 5:
+                        self._npu_info = {
+                            'available': True,
+                            'platform': 'Intel NPU',
+                            'utilization': int(parts[4]),
+                            'frequency': int(parts[1]),
+                            'max_frequency': int(parts[2]),
+                            'memory_used': int(parts[3]),
+                            'power': 0
+                        }
+                else:
+                    self._npu_info = self._empty_npu_info()
+            else:
+                self._npu_info = self._empty_npu_info()
     
     def _stream_worker(self):
         """Background thread that reads streaming data from ADB."""
@@ -431,6 +453,11 @@ class ADBMonitorRaw:
         with self._data_lock:
             return self._gpu_info.copy()
     
+    def get_npu_info(self) -> Dict:
+        """Get NPU information."""
+        with self._data_lock:
+            return self._npu_info.copy()
+    
     def get_network_info(self) -> Dict:
         """Get network information."""
         with self._data_lock:
@@ -463,6 +490,9 @@ class ADBMonitorRaw:
     
     def _empty_gpu_info(self) -> Dict:
         return {'available': False, 'gpus': []}
+    
+    def _empty_npu_info(self) -> Dict:
+        return {'available': False}
     
     def _empty_network_info(self) -> Dict:
         return {
