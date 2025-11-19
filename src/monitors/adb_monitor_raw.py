@@ -473,6 +473,11 @@ class ADBMonitorRaw:
         with self._data_lock:
             return self._latest_raw_data.get('timestamp_ms', 0)
     
+    def get_latest_data(self) -> Dict:
+        """Get latest raw data from Android device (for tier1 metrics access)."""
+        with self._data_lock:
+            return self._latest_raw_data.copy()
+    
     def _empty_cpu_info(self) -> Dict:
         return {
             'cpu_count': 0,
