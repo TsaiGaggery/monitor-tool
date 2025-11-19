@@ -154,7 +154,16 @@ class DataExporter:
                     'net_rx_bytes': row['net_rx_bytes'],
                     'net_tx_bytes': row['net_tx_bytes'],
                     'disk_read_sectors': row['disk_read_sectors'],
-                    'disk_write_sectors': row['disk_write_sectors']
+                    'disk_write_sectors': row['disk_write_sectors'],
+                    # Tier 1 metrics (optional)
+                    'ctxt': row.get('ctxt'),
+                    'load_avg_1m': row.get('load_avg_1m'),
+                    'load_avg_5m': row.get('load_avg_5m'),
+                    'load_avg_15m': row.get('load_avg_15m'),
+                    'procs_running': row.get('procs_running'),
+                    'procs_blocked': row.get('procs_blocked'),
+                    'per_core_irq_pct': row.get('per_core_irq_pct', ''),
+                    'per_core_softirq_pct': row.get('per_core_softirq_pct', '')
                 }
                 
                 # For first sample, create placeholder with 0% utilizations
@@ -325,7 +334,16 @@ class DataExporter:
                     'net_rx_bytes': row['net_rx_bytes'],
                     'net_tx_bytes': row['net_tx_bytes'],
                     'disk_read_sectors': row['disk_read_sectors'],
-                    'disk_write_sectors': row['disk_write_sectors']
+                    'disk_write_sectors': row['disk_write_sectors'],
+                    # Tier 1 metrics (optional)
+                    'ctxt': row.get('ctxt'),
+                    'load_avg_1m': row.get('load_avg_1m'),
+                    'load_avg_5m': row.get('load_avg_5m'),
+                    'load_avg_15m': row.get('load_avg_15m'),
+                    'procs_running': row.get('procs_running'),
+                    'procs_blocked': row.get('procs_blocked'),
+                    'per_core_irq_pct': row.get('per_core_irq_pct', ''),
+                    'per_core_softirq_pct': row.get('per_core_softirq_pct', '')
                 }
                 
                 # For first sample, create placeholder with 0% utilizations
@@ -526,7 +544,7 @@ class DataExporter:
         write_mb_s = (delta_write_sectors * SECTOR_SIZE) / (1024 * 1024)
         
         # Construct monitoring sample (match format from main_window.py add_sample)
-        return {
+        sample = {
             'timestamp': datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S'),
             'time_seconds': timestamp,
             'cpu': {
@@ -607,6 +625,52 @@ class DataExporter:
                 'partition_usage': []
             }
         }
+        
+        # Tier 1 metrics (optional, may be NULL/None if disabled)
+        if 'ctxt' in raw_data and raw_data['ctxt'] is not None:
+            # Context switches (delta from previous)
+            prev_ctxt = prev_raw.get('ctxt', 0) or 0
+            curr_ctxt = raw_data.get('ctxt', 0) or 0
+            delta_ctxt = max(0, curr_ctxt - prev_ctxt)
+            
+            # Load average
+            load_1m = raw_data.get('load_avg_1m', 0) or 0
+            load_5m = raw_data.get('load_avg_5m', 0) or 0
+            load_15m = raw_data.get('load_avg_15m', 0) or 0
+            
+            # Process counts
+            procs_running = raw_data.get('procs_running', 0) or 0
+            procs_blocked = raw_data.get('procs_blocked', 0) or 0
+            
+            # Per-core IRQ/softirq percentages (comma-separated strings -> list of floats)
+            per_core_irq_pct_str = raw_data.get('per_core_irq_pct', '')
+            per_core_softirq_pct_str = raw_data.get('per_core_softirq_pct', '')
+            
+            per_core_irq_pct = []
+            per_core_softirq_pct = []
+            
+            if per_core_irq_pct_str and per_core_irq_pct_str != 'NULL':
+                per_core_irq_pct = [float(x) for x in per_core_irq_pct_str.split(',') if x]
+            if per_core_softirq_pct_str and per_core_softirq_pct_str != 'NULL':
+                per_core_softirq_pct = [float(x) for x in per_core_softirq_pct_str.split(',') if x]
+            
+            # Add tier1 section to sample
+            sample['tier1'] = {
+                'context_switches': delta_ctxt,
+                'load_average': {
+                    '1min': load_1m,
+                    '5min': load_5m,
+                    '15min': load_15m
+                },
+                'processes': {
+                    'running': procs_running,
+                    'blocked': procs_blocked
+                },
+                'per_core_irq_pct': per_core_irq_pct,
+                'per_core_softirq_pct': per_core_softirq_pct
+            }
+        
+        return sample
     
     def _create_first_sample_ssh(self, raw_data: Dict, timestamp: int) -> Dict:
         """Create first SSH sample with 0% utilizations (no prev_raw for deltas).
@@ -906,6 +970,50 @@ class DataExporter:
                 'partition_usage': []
             }
         }
+        
+        # Tier 1 metrics (optional, may be NULL/None if disabled)
+        if 'ctxt' in raw_data and raw_data['ctxt'] is not None:
+            # Context switches (delta from previous)
+            prev_ctxt = prev_raw.get('ctxt', 0) or 0
+            curr_ctxt = raw_data.get('ctxt', 0) or 0
+            delta_ctxt = max(0, curr_ctxt - prev_ctxt)
+            
+            # Load average
+            load_1m = raw_data.get('load_avg_1m', 0) or 0
+            load_5m = raw_data.get('load_avg_5m', 0) or 0
+            load_15m = raw_data.get('load_avg_15m', 0) or 0
+            
+            # Process counts
+            procs_running = raw_data.get('procs_running', 0) or 0
+            procs_blocked = raw_data.get('procs_blocked', 0) or 0
+            
+            # Per-core IRQ/softirq percentages (comma-separated strings -> list of floats)
+            per_core_irq_pct_str = raw_data.get('per_core_irq_pct', '')
+            per_core_softirq_pct_str = raw_data.get('per_core_softirq_pct', '')
+            
+            per_core_irq_pct = []
+            per_core_softirq_pct = []
+            
+            if per_core_irq_pct_str and per_core_irq_pct_str != 'NULL':
+                per_core_irq_pct = [float(x) for x in per_core_irq_pct_str.split(',') if x]
+            if per_core_softirq_pct_str and per_core_softirq_pct_str != 'NULL':
+                per_core_softirq_pct = [float(x) for x in per_core_softirq_pct_str.split(',') if x]
+            
+            # Add tier1 section to sample
+            sample['tier1'] = {
+                'context_switches': delta_ctxt,
+                'load_average': {
+                    '1min': load_1m,
+                    '5min': load_5m,
+                    '15min': load_15m
+                },
+                'processes': {
+                    'running': procs_running,
+                    'blocked': procs_blocked
+                },
+                'per_core_irq_pct': per_core_irq_pct,
+                'per_core_softirq_pct': per_core_softirq_pct
+            }
         
         return sample
     
@@ -1243,6 +1351,16 @@ class DataExporter:
         disk_read = []
         disk_write = []
         
+        # Tier 1 data arrays
+        tier1_context_switches = []
+        tier1_load_avg_1m = []
+        tier1_load_avg_5m = []
+        tier1_load_avg_15m = []
+        tier1_procs_running = []
+        tier1_procs_blocked = []
+        tier1_per_core_irq = []
+        tier1_per_core_softirq = []
+        
         # Track max cores/temps for consistent array sizes
         max_cpu_cores = 0
         max_temp_sensors = 0
@@ -1402,6 +1520,55 @@ class DataExporter:
             else:
                 disk_read.append(0)
                 disk_write.append(0)
+            
+            # Tier 1 data extraction
+            if 'tier1' in sample:
+                tier1_data = sample['tier1']
+                if isinstance(tier1_data, dict):
+                    tier1_context_switches.append(tier1_data.get('context_switches') or 0)
+                    
+                    # Load average
+                    load_avg = tier1_data.get('load_average', {})
+                    if isinstance(load_avg, dict):
+                        tier1_load_avg_1m.append(load_avg.get('1min') or 0)
+                        tier1_load_avg_5m.append(load_avg.get('5min') or 0)
+                        tier1_load_avg_15m.append(load_avg.get('15min') or 0)
+                    else:
+                        tier1_load_avg_1m.append(0)
+                        tier1_load_avg_5m.append(0)
+                        tier1_load_avg_15m.append(0)
+                    
+                    # Processes
+                    procs = tier1_data.get('processes', {})
+                    if isinstance(procs, dict):
+                        tier1_procs_running.append(procs.get('running') or 0)
+                        tier1_procs_blocked.append(procs.get('blocked') or 0)
+                    else:
+                        tier1_procs_running.append(0)
+                        tier1_procs_blocked.append(0)
+                    
+                    # Per-core IRQ/SoftIRQ
+                    tier1_per_core_irq.append(tier1_data.get('per_core_irq_pct', []))
+                    tier1_per_core_softirq.append(tier1_data.get('per_core_softirq_pct', []))
+                else:
+                    tier1_context_switches.append(0)
+                    tier1_load_avg_1m.append(0)
+                    tier1_load_avg_5m.append(0)
+                    tier1_load_avg_15m.append(0)
+                    tier1_procs_running.append(0)
+                    tier1_procs_blocked.append(0)
+                    tier1_per_core_irq.append([])
+                    tier1_per_core_softirq.append([])
+            else:
+                # No Tier 1 data - append zeros to keep arrays aligned
+                tier1_context_switches.append(0)
+                tier1_load_avg_1m.append(0)
+                tier1_load_avg_5m.append(0)
+                tier1_load_avg_15m.append(0)
+                tier1_procs_running.append(0)
+                tier1_procs_blocked.append(0)
+                tier1_per_core_irq.append([])
+                tier1_per_core_softirq.append([])
         
         # Convert to JSON for JavaScript
         import json
@@ -1442,6 +1609,31 @@ class DataExporter:
                 'usage': npu_usage
             }
         }
+        
+        # Only add Tier 1 data if it exists (check if any non-zero values)
+        # For arrays of arrays (per_core_irq), check if any inner array is non-empty
+        has_tier1_data = (
+            any(tier1_context_switches) or
+            any(tier1_load_avg_1m) or
+            any(tier1_load_avg_5m) or
+            any(tier1_load_avg_15m) or
+            any(tier1_procs_running) or
+            any(tier1_procs_blocked) or
+            any(len(arr) > 0 for arr in tier1_per_core_irq if isinstance(arr, list)) or
+            any(len(arr) > 0 for arr in tier1_per_core_softirq if isinstance(arr, list))
+        )
+        
+        if has_tier1_data:
+            chart_data['tier1'] = {
+                'context_switches': tier1_context_switches,
+                'load_avg_1m': tier1_load_avg_1m,
+                'load_avg_5m': tier1_load_avg_5m,
+                'load_avg_15m': tier1_load_avg_15m,
+                'procs_running': tier1_procs_running,
+                'procs_blocked': tier1_procs_blocked,
+                'per_core_irq': tier1_per_core_irq,
+                'per_core_softirq': tier1_per_core_softirq
+            }
         
         # Calculate statistics
         stats = self._calculate_statistics()

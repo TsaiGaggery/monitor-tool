@@ -38,6 +38,16 @@ monitoring:
     enabled: true
     exclude_virtual: true  # Exclude loop, ram, dm-, sr, zram devices
     default_disk: auto  # auto or specific disk name (e.g., sda, nvme0n1)
+  
+  # Advanced metrics (Tier 1) - Higher debugging value, minimal overhead
+  # Adds ~33% collection time, ~0.13% CPU at 1Hz monitoring
+  tier1_metrics:
+    enabled: true  # Set to true to enable advanced debugging metrics
+    # Includes:
+    # - Context switches: Total system-wide context switches (useful for debugging scheduler issues)
+    # - Load average: 1min, 5min, 15min system load
+    # - Process counts: Total processes, running, blocked (detect process storms)
+    # - Per-core IRQ/softirq %: Interrupt overhead per CPU core (identify IRQ imbalance)
 
 # Frequency control
 frequency_control:

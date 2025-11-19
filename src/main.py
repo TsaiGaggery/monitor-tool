@@ -5,6 +5,7 @@ import sys
 import os
 import argparse
 import getpass
+from pathlib import Path
 
 # Add src directory to Python path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -40,6 +41,22 @@ def main():
     
     # Parse known args (allow Qt args to pass through)
     args, unknown = parser.parse_known_args()
+    
+    # Load configuration
+    config_path = Path(__file__).parent.parent / 'config' / 'default.yaml'
+    enable_tier1 = False
+    try:
+        import yaml
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+            # tier1_metrics is under monitoring section
+            enable_tier1 = config.get('monitoring', {}).get('tier1_metrics', {}).get('enabled', False)
+    except ImportError:
+        # yaml module not installed, use default
+        pass
+    except Exception as e:
+        print(f"⚠️  Warning: Could not load config file: {e}")
+        print(f"   Using default tier1_metrics.enabled = False")
     
     # Reconstruct sys.argv for QApplication
     sys.argv = [sys.argv[0]] + unknown
@@ -90,7 +107,8 @@ def main():
                 username=args.user,
                 password=password,
                 port=args.ssh_port,
-                key_path=args.key
+                key_path=args.key,
+                enable_tier1=enable_tier1
             )
             
             # Try to connect

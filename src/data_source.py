@@ -346,7 +346,7 @@ class RemoteLinuxDataSource(MonitorDataSource):
     """
     
     def __init__(self, host: str, port: int = 22, username: str = None, password: str = None,
-                 key_path: str = None, interval: int = 1):
+                 key_path: str = None, interval: int = 1, enable_tier1: bool = False):
         """Initialize remote Linux data source.
         
         Args:
@@ -356,6 +356,7 @@ class RemoteLinuxDataSource(MonitorDataSource):
             password: SSH password (optional if using key)
             key_path: Path to SSH private key (optional if using password)
             interval: Monitoring interval in seconds
+            enable_tier1: Enable Tier 1 metrics (context switches, load avg, process counts, IRQ%)
         """
         from monitors.ssh_monitor_raw import SSHMonitorRaw
         
@@ -365,6 +366,7 @@ class RemoteLinuxDataSource(MonitorDataSource):
         self.password = password
         self.key_path = key_path
         self.interval = interval
+        self.enable_tier1 = enable_tier1
         
         # For DataExporter to identify this as SSH data source
         self.ssh_host = host  # Similar to device_ip for Android
@@ -375,7 +377,8 @@ class RemoteLinuxDataSource(MonitorDataSource):
             password=password,
             key_path=key_path,
             port=port,
-            interval=interval
+            interval=interval,
+            enable_tier1=enable_tier1
         )
         
         self._connected = False

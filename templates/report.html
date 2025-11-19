@@ -191,6 +191,34 @@
             <canvas id="cpuTempChart"></canvas>
         </div>
         
+        <!-- Tier 1 System Metrics Section -->
+        <h3 id="tier1SectionHeader" style="color: #14ffec; margin-top: 30px; display: none;">📊 Advanced System Metrics (Tier 1)</h3>
+        
+        <div class="chart-container" id="tier1ContextSwitchesContainer" style="display: none;">
+            <div class="chart-title">Context Switches (per second)</div>
+            <canvas id="tier1ContextSwitchesChart"></canvas>
+        </div>
+        
+        <div class="chart-container" id="tier1LoadAverageContainer" style="display: none;">
+            <div class="chart-title">System Load Average</div>
+            <canvas id="tier1LoadAverageChart"></canvas>
+        </div>
+        
+        <div class="chart-container" id="tier1ProcessesContainer" style="display: none;">
+            <div class="chart-title">Process Counts (Running / Blocked)</div>
+            <canvas id="tier1ProcessesChart"></canvas>
+        </div>
+        
+        <div class="chart-container" id="tier1IrqContainer" style="display: none;">
+            <div class="chart-title">Per-Core IRQ% (Hardware Interrupts)</div>
+            <canvas id="tier1IrqChart"></canvas>
+        </div>
+        
+        <div class="chart-container" id="tier1SoftirqContainer" style="display: none;">
+            <div class="chart-title">Per-Core SoftIRQ% (Software Interrupts)</div>
+            <canvas id="tier1SoftirqChart"></canvas>
+        </div>
+        
         <!-- GPU Charts Section -->
         <h3 style="color: #14ffec; margin-top: 30px;">🎮 GPU Metrics</h3>
         
@@ -489,6 +517,230 @@
                 }
             }
         });
+        
+        // ============================================
+        // Tier 1 System Metrics Charts
+        // ============================================
+        
+        // Show Tier 1 section header if any Tier 1 data exists
+        if (chartData.tier1) {
+            document.getElementById('tier1SectionHeader').style.display = 'block';
+        }
+        
+        // Context Switches Chart
+        if (chartData.tier1 && chartData.tier1.context_switches && chartData.tier1.context_switches.length > 0) {
+            document.getElementById('tier1ContextSwitchesContainer').style.display = 'block';
+            new Chart(document.getElementById('tier1ContextSwitchesChart'), {
+                type: 'line',
+                data: {
+                    labels: chartData.timestamps,
+                    datasets: [{
+                        label: 'Context Switches/sec',
+                        data: chartData.tier1.context_switches,
+                        borderColor: '#ff6384',
+                        backgroundColor: 'rgba(255, 99, 132, 0.1)',
+                        borderWidth: 2,
+                        fill: true,
+                        tension: 0.3
+                    }]
+                },
+                options: {
+                    ...commonOptions,
+                    scales: {
+                        ...commonOptions.scales,
+                        y: {
+                            ...commonOptions.scales.y,
+                            title: { display: true, text: 'Context Switches/sec', color: '#e0e0e0' }
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Load Average Chart
+        if (chartData.tier1 && chartData.tier1.load_avg_1m && chartData.tier1.load_avg_1m.length > 0) {
+            document.getElementById('tier1LoadAverageContainer').style.display = 'block';
+            new Chart(document.getElementById('tier1LoadAverageChart'), {
+                type: 'line',
+                data: {
+                    labels: chartData.timestamps,
+                    datasets: [
+                        {
+                            label: '1 minute',
+                            data: chartData.tier1.load_avg_1m,
+                            borderColor: '#ff6384',
+                            borderWidth: 2,
+                            tension: 0.3,
+                            fill: false
+                        },
+                        {
+                            label: '5 minute',
+                            data: chartData.tier1.load_avg_5m,
+                            borderColor: '#36a2eb',
+                            borderWidth: 2,
+                            tension: 0.3,
+                            fill: false
+                        },
+                        {
+                            label: '15 minute',
+                            data: chartData.tier1.load_avg_15m,
+                            borderColor: '#4bc0c0',
+                            borderWidth: 2,
+                            tension: 0.3,
+                            fill: false
+                        }
+                    ]
+                },
+                options: {
+                    ...commonOptions,
+                    scales: {
+                        ...commonOptions.scales,
+                        y: {
+                            ...commonOptions.scales.y,
+                            title: { display: true, text: 'Load Average', color: '#e0e0e0' }
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Process Counts Chart
+        if (chartData.tier1 && chartData.tier1.procs_running && chartData.tier1.procs_running.length > 0) {
+            document.getElementById('tier1ProcessesContainer').style.display = 'block';
+            new Chart(document.getElementById('tier1ProcessesChart'), {
+                type: 'line',
+                data: {
+                    labels: chartData.timestamps,
+                    datasets: [
+                        {
+                            label: 'Running',
+                            data: chartData.tier1.procs_running,
+                            borderColor: '#4bc0c0',
+                            backgroundColor: 'rgba(75, 192, 192, 0.1)',
+                            borderWidth: 2,
+                            fill: true,
+                            tension: 0.3
+                        },
+                        {
+                            label: 'Blocked',
+                            data: chartData.tier1.procs_blocked,
+                            borderColor: '#ff9f40',
+                            backgroundColor: 'rgba(255, 159, 64, 0.1)',
+                            borderWidth: 2,
+                            fill: true,
+                            tension: 0.3
+                        }
+                    ]
+                },
+                options: {
+                    ...commonOptions,
+                    scales: {
+                        ...commonOptions.scales,
+                        y: {
+                            ...commonOptions.scales.y,
+                            title: { display: true, text: 'Process Count', color: '#e0e0e0' },
+                            beginAtZero: true
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Per-Core IRQ% Chart
+        if (chartData.tier1 && chartData.tier1.per_core_irq && chartData.tier1.per_core_irq.length > 0) {
+            // Check if we have actual data (not all empty arrays)
+            const hasIrqData = chartData.tier1.per_core_irq.some(arr => Array.isArray(arr) && arr.length > 0);
+            if (hasIrqData) {
+                document.getElementById('tier1IrqContainer').style.display = 'block';
+                
+                // Prepare datasets for each core
+                // Find first non-empty array to get number of cores
+                const firstNonEmpty = chartData.tier1.per_core_irq.find(arr => Array.isArray(arr) && arr.length > 0);
+                const numCores = firstNonEmpty ? firstNonEmpty.length : 0;
+                const irqDatasets = [];
+            const colors = ['#ff6384', '#36a2eb', '#ffce56', '#4bc0c0', '#ff9f40', '#9966ff', '#ff6384', '#c9cbcf'];
+            
+            for (let core = 0; core < numCores; core++) {
+                irqDatasets.push({
+                    label: `Core ${core}`,
+                    data: chartData.tier1.per_core_irq.map(sample => sample[core] || 0),
+                    borderColor: colors[core % colors.length],
+                    borderWidth: 1.5,
+                    tension: 0.3,
+                    fill: false,
+                    hidden: core >= 4  // Hide cores 4+ by default, like CPU frequency
+                });
+            }
+            
+            new Chart(document.getElementById('tier1IrqChart'), {
+                type: 'line',
+                data: {
+                    labels: chartData.timestamps,
+                    datasets: irqDatasets
+                },
+                options: {
+                    ...commonOptions,
+                    scales: {
+                        ...commonOptions.scales,
+                        y: {
+                            ...commonOptions.scales.y,
+                            title: { display: true, text: 'IRQ %', color: '#e0e0e0' },
+                            beginAtZero: true,
+                            max: 100
+                        }
+                    }
+                }
+            });
+            }
+        }
+        
+        // Per-Core SoftIRQ% Chart
+        if (chartData.tier1 && chartData.tier1.per_core_softirq && chartData.tier1.per_core_softirq.length > 0) {
+            // Check if we have actual data (not all empty arrays)
+            const hasSoftirqData = chartData.tier1.per_core_softirq.some(arr => Array.isArray(arr) && arr.length > 0);
+            if (hasSoftirqData) {
+                document.getElementById('tier1SoftirqContainer').style.display = 'block';
+                
+                // Prepare datasets for each core
+                // Find first non-empty array to get number of cores
+                const firstNonEmpty = chartData.tier1.per_core_softirq.find(arr => Array.isArray(arr) && arr.length > 0);
+                const numCores = firstNonEmpty ? firstNonEmpty.length : 0;
+                const softirqDatasets = [];
+            const colors = ['#ff6384', '#36a2eb', '#ffce56', '#4bc0c0', '#ff9f40', '#9966ff', '#ff6384', '#c9cbcf'];
+            
+            for (let core = 0; core < numCores; core++) {
+                softirqDatasets.push({
+                    label: `Core ${core}`,
+                    data: chartData.tier1.per_core_softirq.map(sample => sample[core] || 0),
+                    borderColor: colors[core % colors.length],
+                    borderWidth: 1.5,
+                    tension: 0.3,
+                    fill: false,
+                    hidden: core >= 4  // Hide cores 4+ by default, like CPU frequency
+                });
+            }
+            
+            new Chart(document.getElementById('tier1SoftirqChart'), {
+                type: 'line',
+                data: {
+                    labels: chartData.timestamps,
+                    datasets: softirqDatasets
+                },
+                options: {
+                    ...commonOptions,
+                    scales: {
+                        ...commonOptions.scales,
+                        y: {
+                            ...commonOptions.scales.y,
+                            title: { display: true, text: 'SoftIRQ %', color: '#e0e0e0' },
+                            beginAtZero: true,
+                            max: 100
+                        }
+                    }
+                }
+            });
+            }
+        }
         
         // GPU Usage & Frequency Chart (Dual Y-axis)
         new Chart(document.getElementById('gpuUsageChart'), {

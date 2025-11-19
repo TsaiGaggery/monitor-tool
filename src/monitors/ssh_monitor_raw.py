@@ -18,7 +18,7 @@ class SSHMonitorRaw:
     
     def __init__(self, host: str, user: str, password: Optional[str] = None,
                  key_path: Optional[str] = None, port: int = 22,
-                 interval: int = 1):
+                 interval: int = 1, enable_tier1: bool = False):
         """
         Initialize SSH monitor
         
@@ -29,6 +29,7 @@ class SSHMonitorRaw:
             key_path: Path to SSH private key (optional if using password)
             port: SSH port (default 22)
             interval: Monitoring interval in seconds
+            enable_tier1: Enable Tier 1 metrics (context switches, load avg, process counts, IRQ%)
         """
         self.host = host
         self.user = user
@@ -36,6 +37,7 @@ class SSHMonitorRaw:
         self.key_path = key_path
         self.port = port
         self.interval = interval
+        self.enable_tier1 = enable_tier1
         
         self.ssh_client: Optional[paramiko.SSHClient] = None
         self.monitor_channel = None
@@ -207,8 +209,10 @@ class SSHMonitorRaw:
                 script_content = f.read()
             
             # Execute remote script via SSH
+            # Pass interval and tier1 flag as arguments to bash script
+            tier1_flag = 1 if self.enable_tier1 else 0
             stdin, stdout, stderr = self.ssh_client.exec_command(
-                f'bash -s {self.interval}',
+                f'bash -s {self.interval} {tier1_flag}',
                 get_pty=True
             )
             
