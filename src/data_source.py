@@ -107,8 +107,12 @@ class MonitorDataSource(ABC):
 class LocalDataSource(MonitorDataSource):
     """Local system data source using psutil."""
     
-    def __init__(self):
-        """Initialize local data source."""
+    def __init__(self, enable_tier1: bool = False):
+        """Initialize local data source.
+        
+        Args:
+            enable_tier1: Enable Tier 1 metrics (context switches, load avg, process counts)
+        """
         from monitors import (CPUMonitor, MemoryMonitor, GPUMonitor, 
                             NPUMonitor, NetworkMonitor, DiskMonitor)
         
@@ -119,6 +123,7 @@ class LocalDataSource(MonitorDataSource):
         self.network_monitor = NetworkMonitor()
         self.disk_monitor = DiskMonitor()
         self._connected = True
+        self.enable_tier1 = enable_tier1
     
     def connect(self) -> bool:
         """Connect to local system (always successful)."""
@@ -185,6 +190,146 @@ class LocalDataSource(MonitorDataSource):
     def get_source_name(self) -> str:
         """Get data source name."""
         return "Local System"
+    
+    def get_tier1_info(self) -> Dict:
+        """Get Tier 1 metrics from local system.
+        
+        Returns:
+            Dictionary containing tier1 metrics including context switches,
+            load average, process counts, per-core IRQ/SoftIRQ, and interrupts.
+        """
+        if not self.enable_tier1:
+            return {}
+        
+        import psutil
+        
+        # Get CPU stats (context switches, interrupts)
+        cpu_info = self.cpu_monitor.get_all_info()
+        stats = cpu_info.get('stats', {})
+        usage = cpu_info.get('usage', {})
+        load_avg = usage.get('load_avg', (0, 0, 0))
+        per_core = cpu_info.get('per_core', [])
+        
+        # Get process counts
+        procs_running = 0
+        procs_blocked = 0
+        try:
+            for proc in psutil.process_iter(['status']):
+                status = proc.info.get('status', '')
+                if status == psutil.STATUS_RUNNING:
+                    procs_running += 1
+                elif status in [psutil.STATUS_DISK_SLEEP, psutil.STATUS_STOPPED]:
+                    procs_blocked += 1
+        except Exception:
+            pass
+        
+        # Extract per-core IRQ and SoftIRQ percentages from per_core data
+        # Note: psutil returns cumulative time, we need to calculate % ourselves
+        # Using psutil.cpu_times_percent() for instant percentages
+        per_core_irq_pct = []
+        per_core_softirq_pct = []
+        
+        try:
+            # Get per-core CPU time percentages (non-blocking, uses internal delta tracking)
+            per_core_pct = psutil.cpu_times_percent(interval=None, percpu=True)
+            for core_pct in per_core_pct:
+                per_core_irq_pct.append(getattr(core_pct, 'irq', 0))
+                per_core_softirq_pct.append(getattr(core_pct, 'softirq', 0))
+        except Exception as e:
+            print(f"Error getting per-core IRQ/SoftIRQ percentages: {e}")
+            # Fallback: use zeros
+            num_cores = cpu_info.get('cpu_count', 0)
+            per_core_irq_pct = [0.0] * num_cores
+            per_core_softirq_pct = [0.0] * num_cores
+        
+        # Parse /proc/interrupts for interrupt distribution (SSH-compatible format)
+        interrupts = {}
+        try:
+            with open('/proc/interrupts', 'r') as f:
+                lines = f.readlines()
+                if len(lines) > 0:
+                    # First line has CPU headers
+                    header_parts = lines[0].split()
+                    num_cpus = sum(1 for part in header_parts if part.startswith('CPU'))
+                    
+                    # Parse interrupt lines
+                    interrupt_data = []
+                    for line in lines[1:]:
+                        parts = line.split()
+                        if len(parts) < num_cpus + 2:
+                            continue
+                        
+                        # IRQ number or name
+                        irq_name = parts[0].rstrip(':')
+                        
+                        try:
+                            # Per-CPU interrupt counts
+                            per_cpu = []
+                            total = 0
+                            primary_cpu = 0
+                            max_count = 0
+                            
+                            for cpu_idx in range(num_cpus):
+                                count = int(parts[1 + cpu_idx])
+                                per_cpu.append(count)
+                                total += count
+                                if count > max_count:
+                                    max_count = count
+                                    primary_cpu = cpu_idx
+                            
+                            # Get description (everything after the per-CPU counts)
+                            # Skip the interrupt type field (e.g., "IR-PCI-MSI")
+                            desc_start_idx = num_cpus + 2  # Skip IRQ name + CPU counts + type
+                            desc = ' '.join(parts[desc_start_idx:]) if len(parts) > desc_start_idx else ''
+                            
+                            interrupt_data.append({
+                                'irq': irq_name,
+                                'total': total,
+                                'per_cpu': per_cpu,
+                                'primary_cpu': primary_cpu,
+                                'description': desc
+                            })
+                        except (ValueError, IndexError):
+                            continue
+                    
+                    # Sort by total count and get top 10
+                    interrupt_data.sort(key=lambda x: x['total'], reverse=True)
+                    top_interrupts = interrupt_data[:10]
+                    
+                    # Format as JSON with structure matching SSH format
+                    interrupts = {
+                        'interrupts': [
+                            {
+                                'name': irq['description'][:50] if irq['description'] else irq['irq'],  # Truncate long names
+                                'irq': irq['irq'],
+                                'total': irq['total'],
+                                'cpu': irq['primary_cpu'],
+                                'per_cpu': irq['per_cpu']
+                            }
+                            for irq in top_interrupts
+                        ]
+                    }
+        except Exception as e:
+            print(f"Error collecting interrupt data: {e}")
+            interrupts = {}
+        
+        tier1_data = {
+            'context_switches': stats.get('ctx_switches', 0),
+            'load_average': {
+                '1min': load_avg[0] if len(load_avg) > 0 else 0,
+                '5min': load_avg[1] if len(load_avg) > 1 else 0,
+                '15min': load_avg[2] if len(load_avg) > 2 else 0
+            },
+            'processes': {
+                'running': procs_running,
+                'blocked': procs_blocked
+            },
+            'per_core_irq_pct': per_core_irq_pct,
+            'per_core_softirq_pct': per_core_softirq_pct,
+            'interrupts': interrupts
+        }
+        
+        return tier1_data
 
 
 class AndroidDataSource(MonitorDataSource):
@@ -232,7 +377,56 @@ class AndroidDataSource(MonitorDataSource):
         """Get CPU information from Android device."""
         if not self.is_connected():
             return self._empty_cpu_info()
-        return self.adb_monitor.get_cpu_info()
+        
+        cpu_info = self.adb_monitor.get_cpu_info()
+        
+        # Calculate monitor CPU usage from Android script data
+        raw_data = self.adb_monitor.get_latest_data()
+        if raw_data:
+            cpu_raw = raw_data.get('cpu_raw', {})
+            monitor_cpu_usage = self._calculate_monitor_cpu_usage(raw_data, cpu_raw)
+            cpu_info['monitor_cpu_usage'] = monitor_cpu_usage
+        
+        return cpu_info
+    
+    def _calculate_monitor_cpu_usage(self, raw_data: Dict, cpu_raw: Dict) -> float:
+        """Calculate monitor script CPU usage from raw data (same as RemoteLinuxDataSource)."""
+        monitor_utime = raw_data.get('monitor_cpu_utime', 0)
+        monitor_stime = raw_data.get('monitor_cpu_stime', 0)
+        
+        # If no previous data, save current and return 0
+        if not hasattr(self, '_prev_monitor_utime'):
+            self._prev_monitor_utime = monitor_utime
+            self._prev_monitor_stime = monitor_stime
+            self._prev_cpu_total = sum([
+                cpu_raw.get('user', 0), cpu_raw.get('nice', 0), cpu_raw.get('sys', 0),
+                cpu_raw.get('idle', 0), cpu_raw.get('iowait', 0), cpu_raw.get('irq', 0),
+                cpu_raw.get('softirq', 0), cpu_raw.get('steal', 0)
+            ])
+            return 0.0
+        
+        # Calculate current total CPU ticks
+        curr_total = sum([
+            cpu_raw.get('user', 0), cpu_raw.get('nice', 0), cpu_raw.get('sys', 0),
+            cpu_raw.get('idle', 0), cpu_raw.get('iowait', 0), cpu_raw.get('irq', 0),
+            cpu_raw.get('softirq', 0), cpu_raw.get('steal', 0)
+        ])
+        
+        # Calculate deltas
+        delta_monitor = (monitor_utime + monitor_stime) - (self._prev_monitor_utime + self._prev_monitor_stime)
+        delta_total = curr_total - self._prev_cpu_total
+        
+        # Save current for next calculation
+        self._prev_monitor_utime = monitor_utime
+        self._prev_monitor_stime = monitor_stime
+        self._prev_cpu_total = curr_total
+        
+        # Calculate percentage
+        if delta_total > 0:
+            monitor_cpu_pct = (delta_monitor * 100.0) / delta_total
+            return max(0.0, min(100.0, monitor_cpu_pct))
+        
+        return 0.0
     
     def get_memory_info(self) -> Dict:
         """Get memory information from Android device."""
@@ -473,6 +667,9 @@ class RemoteLinuxDataSource(MonitorDataSource):
                 {'label': 'Package id 0', 'current': cpu_temp / 1000.0}
             ]
         
+        # Calculate monitor CPU usage
+        monitor_cpu_usage = self._calculate_monitor_cpu_usage(raw_data, cpu_raw)
+        
         return {
             'cpu_count': len(per_core_raw),
             'physical_count': len(per_core_raw),  # Simplified
@@ -484,7 +681,8 @@ class RemoteLinuxDataSource(MonitorDataSource):
                 'average': avg_freq,
                 'per_core': freq_list
             },
-            'temperature': temp_sensors
+            'temperature': temp_sensors,
+            'monitor_cpu_usage': monitor_cpu_usage
         }
     
     def _calculate_cpu_usage(self, cpu_raw: Dict, per_core_raw: list, timestamp_ms: int) -> Dict:
@@ -552,6 +750,53 @@ class RemoteLinuxDataSource(MonitorDataSource):
         self._prev_cpu_time = timestamp_ms
         
         return result
+    
+    def _calculate_monitor_cpu_usage(self, raw_data: Dict, cpu_raw: Dict) -> float:
+        """Calculate monitor script CPU usage from raw data.
+        
+        Args:
+            raw_data: Raw monitoring data containing monitor_cpu_utime and monitor_cpu_stime
+            cpu_raw: Current CPU raw stats for total ticks calculation
+            
+        Returns:
+            Monitor CPU usage percentage (0-100)
+        """
+        monitor_utime = raw_data.get('monitor_cpu_utime', 0)
+        monitor_stime = raw_data.get('monitor_cpu_stime', 0)
+        
+        # If no previous data, save current and return 0
+        if not hasattr(self, '_prev_monitor_utime'):
+            self._prev_monitor_utime = monitor_utime
+            self._prev_monitor_stime = monitor_stime
+            self._prev_cpu_total = sum([
+                cpu_raw.get('user', 0), cpu_raw.get('nice', 0), cpu_raw.get('sys', 0),
+                cpu_raw.get('idle', 0), cpu_raw.get('iowait', 0), cpu_raw.get('irq', 0),
+                cpu_raw.get('softirq', 0), cpu_raw.get('steal', 0)
+            ])
+            return 0.0
+        
+        # Calculate current total CPU ticks
+        curr_total = sum([
+            cpu_raw.get('user', 0), cpu_raw.get('nice', 0), cpu_raw.get('sys', 0),
+            cpu_raw.get('idle', 0), cpu_raw.get('iowait', 0), cpu_raw.get('irq', 0),
+            cpu_raw.get('softirq', 0), cpu_raw.get('steal', 0)
+        ])
+        
+        # Calculate deltas
+        delta_monitor = (monitor_utime + monitor_stime) - (self._prev_monitor_utime + self._prev_monitor_stime)
+        delta_total = curr_total - self._prev_cpu_total
+        
+        # Save current for next calculation
+        self._prev_monitor_utime = monitor_utime
+        self._prev_monitor_stime = monitor_stime
+        self._prev_cpu_total = curr_total
+        
+        # Calculate percentage
+        if delta_total > 0:
+            monitor_cpu_pct = (delta_monitor * 100.0) / delta_total
+            return max(0.0, min(100.0, monitor_cpu_pct))
+        
+        return 0.0
     
     def get_memory_info(self) -> Dict:
         """Get memory information from remote system."""

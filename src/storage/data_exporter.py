@@ -81,8 +81,8 @@ class DataExporter:
             
             # Query remote database directly via SSH (no backup needed)
             # Use .mode json for easy parsing and .timeout to handle locks
-            sql_query = f"SELECT * FROM raw_samples WHERE timestamp >= {start_timestamp} ORDER BY timestamp ASC"
-            print(f"🔍 DEBUG: SQL query = {sql_query}")
+            # Try monitoring_data first (new schema), fall back to raw_samples (old schema)
+            sql_query = f"SELECT * FROM monitoring_data WHERE timestamp >= {start_timestamp} ORDER BY timestamp ASC"
             
             query_cmd = f"sqlite3 -json {remote_db_path} \".timeout 5000\" \"{sql_query}\""
             ssh_cmd = ["ssh"]
@@ -118,7 +118,6 @@ class DataExporter:
                 return []
             
             print(f"✅ Retrieved {len(rows)} samples from remote Linux database")
-            print(f"🔍 DEBUG: First row timestamp = {rows[0].get('timestamp')}, Last row timestamp = {rows[-1].get('timestamp')}")
             
             # Process raw data into monitoring samples
             processed_samples = []
@@ -163,7 +162,8 @@ class DataExporter:
                     'procs_running': row.get('procs_running'),
                     'procs_blocked': row.get('procs_blocked'),
                     'per_core_irq_pct': row.get('per_core_irq_pct', ''),
-                    'per_core_softirq_pct': row.get('per_core_softirq_pct', '')
+                    'per_core_softirq_pct': row.get('per_core_softirq_pct', ''),
+                    'interrupt_data': row.get('interrupt_data', 'null')
                 }
                 
                 # For first sample, create placeholder with 0% utilizations
@@ -182,6 +182,142 @@ class DataExporter:
             
         except Exception as e:
             print(f"⚠️  Error processing remote Linux database: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+    
+    def _pull_local_db_data(self) -> List[Dict]:
+        """Pull data from local SQLite database for export.
+        
+        Returns:
+            List of processed data samples from local DB (~/.monitor-tool/monitor_data.db)
+        """
+        import os
+        import subprocess
+        import json
+        
+        # Local database path
+        home = os.path.expanduser('~')
+        local_db_path = os.path.join(home, '.monitor-tool', 'monitor_data.db')
+        
+        if not os.path.exists(local_db_path):
+            print(f"⚠️  Local database not found: {local_db_path}")
+            return []
+        
+        print(f"📥 Fetching local database records from {local_db_path}...")
+        
+        try:
+            # Use session start time
+            start_timestamp = self.session_start_timestamp
+            print(f"📅 Exporting data from timestamp >= {start_timestamp}")
+            
+            # Query local database (same schema as SSH now)
+            sql_query = f"SELECT * FROM monitoring_data WHERE timestamp >= {start_timestamp} ORDER BY timestamp ASC"
+            
+            result = subprocess.run(
+                ['sqlite3', '-json', local_db_path, sql_query],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode != 0:
+                print(f"⚠️  Failed to query local database: {result.stderr}")
+                return []
+            
+            # Parse JSON output
+            try:
+                rows = json.loads(result.stdout) if result.stdout.strip() else []
+            except json.JSONDecodeError as e:
+                print(f"⚠️  Failed to parse query result: {e}")
+                return []
+            
+            if not rows:
+                print(f"⚠️  No data found in specified time range")
+                return []
+            
+            print(f"✅ Retrieved {len(rows)} samples from local database")
+            
+            # Process raw data into monitoring samples (same as SSH)
+            processed_samples = []
+            prev_raw = None
+            
+            for idx, row in enumerate(rows):
+                # Parse per_core_raw JSON string
+                per_core_raw = []
+                if row.get('per_core_raw'):
+                    try:
+                        per_core_raw = json.loads(row['per_core_raw'])
+                    except:
+                        pass
+                
+                # Parse per_core_freq_khz comma-separated string
+                per_core_freq_khz = []
+                if row.get('per_core_freq_khz'):
+                    try:
+                        per_core_freq_khz = [int(f) for f in row['per_core_freq_khz'].split(',') if f]
+                    except:
+                        pass
+                
+                raw_data = {
+                    'timestamp': row['timestamp'],
+                    'timestamp_ms': row.get('timestamp_ms', row['timestamp'] * 1000),
+                    'cpu_raw': {
+                        'user': row.get('cpu_user', 0),
+                        'nice': row.get('cpu_nice', 0),
+                        'sys': row.get('cpu_sys', 0),
+                        'idle': row.get('cpu_idle', 0),
+                        'iowait': row.get('cpu_iowait', 0),
+                        'irq': row.get('cpu_irq', 0),
+                        'softirq': row.get('cpu_softirq', 0),
+                        'steal': row.get('cpu_steal', 0)
+                    },
+                    'per_core_raw': per_core_raw,
+                    'per_core_freq_khz': per_core_freq_khz,
+                    'cpu_temp_millideg': row.get('cpu_temp_millideg', 0),
+                    'mem_total_kb': row.get('mem_total_kb', 0),
+                    'mem_free_kb': row.get('mem_free_kb', 0),
+                    'mem_available_kb': row.get('mem_available_kb', 0),
+                    'gpu_driver': row.get('gpu_driver', 'none'),
+                    'gpu_freq_mhz': row.get('gpu_freq_mhz', 0),
+                    'gpu_runtime_ms': row.get('gpu_runtime_ms', 0),
+                    'gpu_memory_used_bytes': row.get('gpu_memory_used_bytes', 0),
+                    'gpu_memory_total_bytes': row.get('gpu_memory_total_bytes', 0),
+                    'npu_info': row.get('npu_info', ''),
+                    'net_rx_bytes': row['net_rx_bytes'],
+                    'net_tx_bytes': row['net_tx_bytes'],
+                    'disk_read_sectors': row['disk_read_sectors'],
+                    'disk_write_sectors': row['disk_write_sectors'],
+                    # Tier 1 metrics
+                    'ctxt': row.get('ctxt'),
+                    'load_avg_1m': row.get('load_avg_1m'),
+                    'load_avg_5m': row.get('load_avg_5m'),
+                    'load_avg_15m': row.get('load_avg_15m'),
+                    'procs_running': row.get('procs_running'),
+                    'procs_blocked': row.get('procs_blocked'),
+                    'per_core_irq_pct': row.get('per_core_irq_pct', ''),
+                    'per_core_softirq_pct': row.get('per_core_softirq_pct', ''),
+                    'interrupt_data': row.get('interrupt_data', 'null'),
+                    'monitor_cpu_utime': row.get('monitor_cpu_utime', 0),
+                    'monitor_cpu_stime': row.get('monitor_cpu_stime', 0)
+                }
+                
+                # For first sample, create placeholder with 0% utilizations
+                if idx == 0:
+                    processed = self._create_first_sample_ssh(raw_data, row['timestamp'])
+                    processed_samples.append(processed)
+                else:
+                    # Process using same logic as ssh_monitor_raw.py
+                    processed = self._process_ssh_raw_data(raw_data, prev_raw, row['timestamp'])
+                    if processed:
+                        processed_samples.append(processed)
+                
+                prev_raw = raw_data
+            
+            return processed_samples
+            
+        except Exception as e:
+            print(f"⚠️  Error processing local database: {e}")
             import traceback
             traceback.print_exc()
             return []
@@ -343,7 +479,8 @@ class DataExporter:
                     'procs_running': row.get('procs_running'),
                     'procs_blocked': row.get('procs_blocked'),
                     'per_core_irq_pct': row.get('per_core_irq_pct', ''),
-                    'per_core_softirq_pct': row.get('per_core_softirq_pct', '')
+                    'per_core_softirq_pct': row.get('per_core_softirq_pct', ''),
+                    'interrupt_data': row.get('interrupt_data', 'null')
                 }
                 
                 # For first sample, create placeholder with 0% utilizations
@@ -654,6 +791,52 @@ class DataExporter:
             if per_core_softirq_pct_str and per_core_softirq_pct_str != 'NULL':
                 per_core_softirq_pct = [float(x) for x in per_core_softirq_pct_str.split(',') if x]
             
+            # Process interrupt data (stored as JSON string in database)
+            interrupt_stats = None
+            interrupt_data_str = raw_data.get('interrupt_data')
+            
+            # Check if we have interrupt data (not null/None)
+            if interrupt_data_str and interrupt_data_str != 'null' and interrupt_data_str != 'NULL':
+                try:
+                    interrupt_json = json.loads(interrupt_data_str)
+                    
+                    if interrupt_json and 'interrupts' in interrupt_json:
+                        # Calculate interrupt rates (deltas from previous sample)
+                        interrupt_rates = {}
+                        
+                        # Get previous interrupt data
+                        prev_interrupt_str = prev_raw.get('interrupt_data') if prev_raw else None
+                        if prev_interrupt_str and prev_interrupt_str != 'null' and prev_interrupt_str != 'NULL':
+                            try:
+                                prev_interrupt_json = json.loads(prev_interrupt_str)
+                                prev_interrupts = {irq['name']: irq for irq in prev_interrupt_json.get('interrupts', [])}
+                            except:
+                                prev_interrupts = {}
+                        else:
+                            prev_interrupts = {}
+                        
+                        # Build interrupt stats with rates
+                        for irq in interrupt_json['interrupts']:
+                            name = irq['name']
+                            total = irq['total']
+                            prev_total = prev_interrupts.get(name, {}).get('total', total)
+                            rate = max(0, total - prev_total)  # interrupts since last sample
+                            
+                            interrupt_rates[name] = {
+                                'irq': irq['irq'],
+                                'total': total,
+                                'rate': rate,
+                                'cpu': irq['cpu'],
+                                'per_cpu': irq['per_cpu']
+                            }
+                        
+                        interrupt_stats = interrupt_rates
+                except json.JSONDecodeError as e:
+                    # If JSON parsing fails, print error
+                    print(f"⚠️  JSON parse error for interrupt_data: {e}")
+                except Exception as e:
+                    print(f"⚠️  Error processing interrupt data: {e}")
+            
             # Add tier1 section to sample
             sample['tier1'] = {
                 'context_switches': delta_ctxt,
@@ -667,7 +850,8 @@ class DataExporter:
                     'blocked': procs_blocked
                 },
                 'per_core_irq_pct': per_core_irq_pct,
-                'per_core_softirq_pct': per_core_softirq_pct
+                'per_core_softirq_pct': per_core_softirq_pct,
+                'interrupts': interrupt_stats  # Add interrupt data
             }
         
         return sample
@@ -781,6 +965,18 @@ class DataExporter:
             'disk': {
                 'read_MB_per_s': 0.0,
                 'write_MB_per_s': 0.0
+            },
+            # Add tier1 placeholder (empty interrupts for first sample)
+            'tier1': {
+                'context_switches': 0.0,
+                'load_avg_1m': raw_data.get('load_avg_1m', 0.0),
+                'load_avg_5m': raw_data.get('load_avg_5m', 0.0),
+                'load_avg_15m': raw_data.get('load_avg_15m', 0.0),
+                'procs_running': raw_data.get('procs_running', 0),
+                'procs_blocked': raw_data.get('procs_blocked', 0),
+                'per_core_irq_pct': [],
+                'per_core_softirq_pct': [],
+                'interrupts': {}  # Empty for first sample (no deltas)
             }
         }
         
@@ -818,6 +1014,28 @@ class DataExporter:
             per_core_freq.append(core_freq_mhz)
         
         avg_freq = sum(per_core_freq) / len(per_core_freq) if per_core_freq else 0
+        
+        # Calculate monitor script's own CPU usage
+        monitor_cpu_pct = 0.0
+        monitor_utime = raw_data.get('monitor_cpu_utime', 0)
+        monitor_stime = raw_data.get('monitor_cpu_stime', 0)
+        prev_monitor_utime = prev_raw.get('monitor_cpu_utime', 0)
+        prev_monitor_stime = prev_raw.get('monitor_cpu_stime', 0)
+        
+        if monitor_utime is not None and monitor_stime is not None:
+            # CPU ticks used by monitor script since last sample
+            delta_utime = monitor_utime - prev_monitor_utime
+            delta_stime = monitor_stime - prev_monitor_stime
+            delta_monitor_ticks = delta_utime + delta_stime
+            
+            # Total system ticks
+            curr_total = sum([raw_data['cpu_raw'][k] for k in ['user', 'nice', 'sys', 'idle', 'iowait', 'irq', 'softirq', 'steal']])
+            prev_total = sum([prev_raw['cpu_raw'][k] for k in ['user', 'nice', 'sys', 'idle', 'iowait', 'irq', 'softirq', 'steal']])
+            delta_total_ticks = curr_total - prev_total
+            
+            # Monitor CPU% = (monitor ticks / system ticks) * 100
+            if delta_total_ticks > 0:
+                monitor_cpu_pct = (delta_monitor_ticks * 100.0) / delta_total_ticks
         
         # Memory
         mem_total_gb = raw_data['mem_total_kb'] / 1024 / 1024
@@ -903,7 +1121,8 @@ class DataExporter:
                         'high': 100.0,
                         'critical': 105.0
                     }]
-                } if raw_data['cpu_temp_millideg'] > 0 else {}
+                } if raw_data['cpu_temp_millideg'] > 0 else {},
+                'monitor_cpu_usage': monitor_cpu_pct  # Monitor script's own CPU usage
             },
             'memory': {
                 'memory': {
@@ -999,6 +1218,52 @@ class DataExporter:
             if per_core_softirq_pct_str and per_core_softirq_pct_str != 'NULL':
                 per_core_softirq_pct = [float(x) for x in per_core_softirq_pct_str.split(',') if x]
             
+            # Process interrupt data (stored as JSON string in database)
+            interrupt_stats = None
+            interrupt_data_str = raw_data.get('interrupt_data')
+            
+            # Check if we have interrupt data (not null/None)
+            if interrupt_data_str and interrupt_data_str != 'null' and interrupt_data_str != 'NULL':
+                try:
+                    interrupt_json = json.loads(interrupt_data_str)
+                    
+                    if interrupt_json and 'interrupts' in interrupt_json:
+                        # Calculate interrupt rates (deltas from previous sample)
+                        interrupt_rates = {}
+                        
+                        # Get previous interrupt data
+                        prev_interrupt_str = prev_raw.get('interrupt_data') if prev_raw else None
+                        if prev_interrupt_str and prev_interrupt_str != 'null' and prev_interrupt_str != 'NULL':
+                            try:
+                                prev_interrupt_json = json.loads(prev_interrupt_str)
+                                prev_interrupts = {irq['name']: irq for irq in prev_interrupt_json.get('interrupts', [])}
+                            except:
+                                prev_interrupts = {}
+                        else:
+                            prev_interrupts = {}
+                        
+                        # Build interrupt stats with rates
+                        for irq in interrupt_json['interrupts']:
+                            name = irq['name']
+                            total = irq['total']
+                            prev_total = prev_interrupts.get(name, {}).get('total', total)
+                            rate = max(0, total - prev_total)  # interrupts since last sample
+                            
+                            interrupt_rates[name] = {
+                                'irq': irq['irq'],
+                                'total': total,
+                                'rate': rate,
+                                'cpu': irq['cpu'],
+                                'per_cpu': irq['per_cpu']
+                            }
+                        
+                        interrupt_stats = interrupt_rates
+                except json.JSONDecodeError as e:
+                    # If JSON parsing fails, print error
+                    print(f"⚠️  JSON parse error for interrupt_data: {e}")
+                except Exception as e:
+                    print(f"⚠️  Error processing interrupt data: {e}")
+            
             # Add tier1 section to sample
             sample['tier1'] = {
                 'context_switches': delta_ctxt,
@@ -1012,7 +1277,8 @@ class DataExporter:
                     'blocked': procs_blocked
                 },
                 'per_core_irq_pct': per_core_irq_pct,
-                'per_core_softirq_pct': per_core_softirq_pct
+                'per_core_softirq_pct': per_core_softirq_pct,
+                'interrupts': interrupt_stats  # Add interrupt data
             }
         
         return sample
@@ -1053,11 +1319,14 @@ class DataExporter:
         
         filepath = self.output_dir / filename
         
-        # For remote sources (SSH/Android), ONLY use remote database
-        # Do NOT mix with session_data (host-side streaming data)
+        # Priority for data sources:
+        # 1. SSH DB (remote Linux)
+        # 2. Android DB (Android device)  
+        # 3. Local DB (~/.monitor-tool/monitor_data.db)
+        # 4. Session data (in-memory fallback)
         export_data = None
         
-        # Priority: SSH DB > Android DB > Session data (local only)
+        # Priority: SSH DB > Android DB > Local DB > Session data
         if use_ssh_db:
             ssh_data = self._pull_ssh_db_data()
             if ssh_data:
@@ -1070,13 +1339,20 @@ class DataExporter:
                 export_data = android_data
                 print(f"📊 Exporting {len(export_data)} samples from Android database")
         
-        # Fallback to session_data only for true local sources
+        # Try local database for LocalDataSource
+        if export_data is None and not self._is_remote_source():
+            local_data = self._pull_local_db_data()
+            if local_data:
+                export_data = local_data
+                print(f"📊 Exporting {len(export_data)} samples from local database")
+        
+        # Fallback to session_data only if no database available
         if export_data is None:
             if self._is_remote_source():
                 raise ValueError("Remote data source has no database samples available for export")
             export_data = self.session_data
             if export_data:
-                print(f"📊 Exporting {len(export_data)} samples from session data (local source)")
+                print(f"📊 Exporting {len(export_data)} samples from session data (in-memory)")
         
         if not export_data:
             raise ValueError("No data to export")
@@ -1115,11 +1391,14 @@ class DataExporter:
         
         filepath = self.output_dir / filename
         
-        # For remote sources (SSH/Android), ONLY use remote database
-        # Do NOT mix with session_data (host-side streaming data)
+        # Priority for data sources:
+        # 1. SSH DB (remote Linux)
+        # 2. Android DB (Android device)  
+        # 3. Local DB (~/.monitor-tool/monitor_data.db)
+        # 4. Session data (in-memory fallback)
         export_samples = None
         
-        # Priority: SSH DB > Android DB > Session data (local only)
+        # Priority: SSH DB > Android DB > Local DB > Session data
         if use_ssh_db:
             ssh_data = self._pull_ssh_db_data()
             if ssh_data:
@@ -1132,13 +1411,20 @@ class DataExporter:
                 export_samples = android_data
                 print(f"📊 Exporting {len(export_samples)} samples from Android database")
         
-        # Fallback to session data only for local sources
+        # Try local database for LocalDataSource
+        if export_samples is None and not self._is_remote_source():
+            local_data = self._pull_local_db_data()
+            if local_data:
+                export_samples = local_data
+                print(f"📊 Exporting {len(export_samples)} samples from local database")
+        
+        # Fallback to session_data only if no database available
         if export_samples is None:
             if self._is_remote_source():
                 raise ValueError("Remote data source has no database samples available for export")
             export_samples = self.session_data
             if export_samples:
-                print(f"📊 Exporting {len(export_samples)} samples from session data (local source)")
+                print(f"📊 Exporting {len(export_samples)} samples from session data (in-memory)")
         
         if not export_samples:
             raise ValueError("No data to export")
@@ -1179,11 +1465,14 @@ class DataExporter:
         
         filepath = self.output_dir / filename
         
-        # For remote sources (SSH/Android), ONLY use remote database
-        # Do NOT mix with session_data (host-side streaming data)
+        # Priority for data sources:
+        # 1. SSH DB (remote Linux)
+        # 2. Android DB (Android device)  
+        # 3. Local DB (~/.monitor-tool/monitor_data.db)
+        # 4. Session data (in-memory fallback)
         export_samples = None
         
-        # Priority: SSH DB > Android DB > Session data (local only)
+        # Priority: SSH DB > Android DB > Local DB > Session data
         if use_ssh_db:
             ssh_data = self._pull_ssh_db_data()
             if ssh_data:
@@ -1196,13 +1485,20 @@ class DataExporter:
                 export_samples = android_data
                 print(f"📊 Exporting {len(export_samples)} samples from Android database")
         
-        # Fallback to session data only for local sources
+        # Try local database for LocalDataSource
+        if export_samples is None and not self._is_remote_source():
+            local_data = self._pull_local_db_data()
+            if local_data:
+                export_samples = local_data
+                print(f"📊 Exporting {len(export_samples)} samples from local database")
+        
+        # Fallback to session_data only if no database available
         if export_samples is None:
             if self._is_remote_source():
                 raise ValueError("Remote data source has no database samples available for export")
             export_samples = self.session_data
             if export_samples:
-                print(f"📊 Exporting {len(export_samples)} samples from session data (local source)")
+                print(f"📊 Exporting {len(export_samples)} samples from session data (in-memory)")
         
         if not export_samples:
             raise ValueError("No data to export")
@@ -1361,11 +1657,15 @@ class DataExporter:
         tier1_per_core_irq = []
         tier1_per_core_softirq = []
         
+        # Interrupt distribution data
+        # Store all interrupt samples to build per-interrupt timeseries
+        interrupt_samples = []  # List of {timestamp_idx, interrupts_dict}
+        
         # Track max cores/temps for consistent array sizes
         max_cpu_cores = 0
         max_temp_sensors = 0
         
-        for sample in self.session_data:
+        for idx, sample in enumerate(self.session_data):
             # Extract timestamp
             if 'timestamp' in sample:
                 timestamps.append(sample['timestamp'])
@@ -1550,6 +1850,15 @@ class DataExporter:
                     # Per-core IRQ/SoftIRQ
                     tier1_per_core_irq.append(tier1_data.get('per_core_irq_pct', []))
                     tier1_per_core_softirq.append(tier1_data.get('per_core_softirq_pct', []))
+                    
+                    # Interrupt data - extract from dict for each sample
+                    interrupts_dict = tier1_data.get('interrupts', None)
+                    if interrupts_dict and isinstance(interrupts_dict, dict):
+                        # Store the interrupt dict for this timestamp
+                        interrupt_samples.append({
+                            'timestamp_idx': idx,
+                            'interrupts': interrupts_dict
+                        })
                 else:
                     tier1_context_switches.append(0)
                     tier1_load_avg_1m.append(0)
@@ -1610,6 +1919,37 @@ class DataExporter:
             }
         }
         
+        # Process interrupt data to build per-interrupt timeseries
+        interrupt_timeseries = {}  # {interrupt_name: {'rates': [...], 'cpus': [...], ...}}
+        if interrupt_samples:
+            # Find all unique interrupt names across all samples
+            all_interrupt_names = set()
+            for sample in interrupt_samples:
+                all_interrupt_names.update(sample['interrupts'].keys())
+            
+            # Build timeseries for each interrupt
+            for name in all_interrupt_names:
+                rates = [0] * len(timestamps)  # Initialize with zeros for all timestamps
+                per_cpu_timeseries = []  # Per-CPU distribution over time
+                cpus = []  # Primary CPU affinity
+                
+                for sample in interrupt_samples:
+                    idx = sample['timestamp_idx']
+                    if name in sample['interrupts']:
+                        irq_data = sample['interrupts'][name]
+                        rates[idx] = irq_data.get('rate', 0)
+                        if not cpus:  # Store CPU affinity from first occurrence
+                            cpus = [irq_data.get('cpu', -1)]
+                        # Store per-CPU interrupt distribution
+                        if 'per_cpu' in irq_data:
+                            per_cpu_timeseries.append(irq_data['per_cpu'])
+                
+                interrupt_timeseries[name] = {
+                    'rates': rates,
+                    'cpu': cpus[0] if cpus else -1,
+                    'per_cpu': per_cpu_timeseries
+                }
+        
         # Only add Tier 1 data if it exists (check if any non-zero values)
         # For arrays of arrays (per_core_irq), check if any inner array is non-empty
         has_tier1_data = (
@@ -1620,7 +1960,8 @@ class DataExporter:
             any(tier1_procs_running) or
             any(tier1_procs_blocked) or
             any(len(arr) > 0 for arr in tier1_per_core_irq if isinstance(arr, list)) or
-            any(len(arr) > 0 for arr in tier1_per_core_softirq if isinstance(arr, list))
+            any(len(arr) > 0 for arr in tier1_per_core_softirq if isinstance(arr, list)) or
+            len(interrupt_timeseries) > 0
         )
         
         if has_tier1_data:
@@ -1632,7 +1973,8 @@ class DataExporter:
                 'procs_running': tier1_procs_running,
                 'procs_blocked': tier1_procs_blocked,
                 'per_core_irq': tier1_per_core_irq,
-                'per_core_softirq': tier1_per_core_softirq
+                'per_core_softirq': tier1_per_core_softirq,
+                'interrupts': interrupt_timeseries
             }
         
         # Calculate statistics

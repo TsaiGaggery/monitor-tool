@@ -134,7 +134,7 @@ def main():
         print(f"📱 Device: {args.ip}:{args.port}")
         data_source = AndroidDataSource(args.ip, args.port)
     else:
-        data_source = LocalDataSource()
+        data_source = LocalDataSource(enable_tier1=enable_tier1)
     
     # Create window with data source
     window = MainWindow(data_source=data_source)

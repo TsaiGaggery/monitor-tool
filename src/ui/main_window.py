@@ -226,8 +226,8 @@ class MainWindow(QMainWindow):
         charts_layout.setSpacing(10)
         
         # Row 1: CPU and Memory
-        self.overview_cpu_plot = MonitorPlotWidget("CPU Usage (%)")
-        self.overview_memory_plot = MonitorPlotWidget("Memory Usage (%)")
+        self.overview_cpu_plot = MonitorPlotWidget("CPU Usage (%)", max_points=90)
+        self.overview_memory_plot = MonitorPlotWidget("Memory Usage (%)", max_points=90)
         charts_layout.addWidget(self.overview_cpu_plot, 0, 0)
         charts_layout.addWidget(self.overview_memory_plot, 0, 1)
         
@@ -235,10 +235,12 @@ class MainWindow(QMainWindow):
         # Use KB/s for network to avoid scientific notation on small values
         self.overview_network_plot = MultiLinePlotWidget("Network Speed", 
                                                          y_label="Upload (KB/s)",
-                                                         y_label2="Download (KB/s)")
+                                                         y_label2="Download (KB/s)",
+                                                         max_points=90)
         self.overview_disk_plot = MultiLinePlotWidget("Disk I/O", 
                                                       y_label="Read (MB/s)",
-                                                      y_label2="Write (MB/s)")
+                                                      y_label2="Write (MB/s)",
+                                                      max_points=90)
         charts_layout.addWidget(self.overview_network_plot, 1, 0)
         charts_layout.addWidget(self.overview_disk_plot, 1, 1)
         
@@ -274,21 +276,23 @@ class MainWindow(QMainWindow):
         self.cpu_freq_label = QLabel("Frequency: -")
         self.cpu_temp_label = QLabel("Temperature: -")
         self.cpu_governor_label = QLabel("Governor: -")
+        self.cpu_monitor_usage_label = QLabel("Monitor CPU: -")
         
         info_layout.addWidget(self.cpu_cores_label, 0, 0)
         info_layout.addWidget(self.cpu_freq_label, 0, 1)
         info_layout.addWidget(self.cpu_temp_label, 1, 0)
         info_layout.addWidget(self.cpu_governor_label, 1, 1)
+        info_layout.addWidget(self.cpu_monitor_usage_label, 2, 0)
         
         info_group.setLayout(info_layout)
         layout.addWidget(info_group)
         
         # CPU usage plot
-        self.cpu_usage_plot = MonitorPlotWidget("CPU Usage (%)")
+        self.cpu_usage_plot = MonitorPlotWidget("CPU Usage (%)", max_points=90)
         layout.addWidget(self.cpu_usage_plot)
         
         # CPU frequency plot
-        self.cpu_freq_plot = MonitorPlotWidget("CPU Frequency (MHz)", y_label="Frequency (MHz)")
+        self.cpu_freq_plot = MonitorPlotWidget("CPU Frequency (MHz)", y_label="Frequency (MHz)", max_points=90)
         layout.addWidget(self.cpu_freq_plot)
         
         return widget
@@ -320,7 +324,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(info_group)
         
         # Memory usage plot
-        self.memory_usage_plot = MonitorPlotWidget("Memory Usage (%)")
+        self.memory_usage_plot = MonitorPlotWidget("Memory Usage (%)", max_points=90)
         layout.addWidget(self.memory_usage_plot)
         
         return widget
@@ -419,7 +423,8 @@ class MainWindow(QMainWindow):
         # Use KB/s for better readability with small values
         self.network_speed_plot = MultiLinePlotWidget("Network Speed", 
                                                       y_label="Upload (KB/s)",
-                                                      y_label2="Download (KB/s)")
+                                                      y_label2="Download (KB/s)",
+                                                      max_points=90)
         layout.addWidget(self.network_speed_plot)
         
         return widget
@@ -453,7 +458,8 @@ class MainWindow(QMainWindow):
         # Disk I/O plot (dual axis: read and write)
         self.disk_io_plot = MultiLinePlotWidget("Disk I/O", 
                                                 y_label="Read (MB/s)",
-                                                y_label2="Write (MB/s)")
+                                                y_label2="Write (MB/s)",
+                                                max_points=90)
         layout.addWidget(self.disk_io_plot)
         
         return widget
@@ -562,6 +568,13 @@ class MainWindow(QMainWindow):
                 self.cpu_governor_label.setText(f"Governor: {governor}")
         else:
             self.cpu_governor_label.setText(f"Governor: N/A (Android)")
+        
+        # Monitor CPU usage
+        monitor_cpu = cpu_info.get('monitor_cpu_usage', 0)
+        if monitor_cpu > 0:
+            self.cpu_monitor_usage_label.setText(f"Monitor CPU: {monitor_cpu:.2f}%")
+        else:
+            self.cpu_monitor_usage_label.setText("Monitor CPU: -")
         
         # Memory data
         memory_info = self.data_source.get_memory_info()
@@ -717,8 +730,14 @@ class MainWindow(QMainWindow):
         
         # Log data to database (only for local monitoring)
         if self.data_logger:
+            # Get tier1 info if available
+            tier1_info = None
+            if hasattr(self.data_source, 'get_tier1_info'):
+                tier1_info = self.data_source.get_tier1_info()
+            
             self.data_logger.log_data(cpu_info, memory_info, gpu_info, 
-                                      npu_info if npu_info.get('available', False) else None)
+                                      npu_info if npu_info.get('available', False) else None,
+                                      network_info, disk_info, tier1_info)
         
         # Add data to exporter (only when we have a new remote timestamp)
         export_data = {
@@ -730,6 +749,12 @@ class MainWindow(QMainWindow):
             'network': network_info,
             'disk': disk_info
         }
+        
+        # Add tier1 data if available (for local mode)
+        if hasattr(self.data_source, 'get_tier1_info'):
+            tier1_info = self.data_source.get_tier1_info()
+            if tier1_info:
+                export_data['tier1'] = tier1_info
         
         # Add UTC timestamp from device (Android/SSH) if available
         should_add_sample = True

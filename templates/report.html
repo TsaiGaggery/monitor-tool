@@ -6,6 +6,7 @@
     <title>System Monitoring Report</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-matrix@2.0.1/dist/chartjs-chart-matrix.min.js"></script>
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -217,6 +218,16 @@
         <div class="chart-container" id="tier1SoftirqContainer" style="display: none;">
             <div class="chart-title">Per-Core SoftIRQ% (Software Interrupts)</div>
             <canvas id="tier1SoftirqChart"></canvas>
+        </div>
+
+        <div class="chart-container" id="tier1InterruptsContainer" style="display: none;">
+            <div class="chart-title">Interrupt Distribution - Top Sources (interrupts/sec)</div>
+            <canvas id="tier1InterruptsChart"></canvas>
+        </div>
+
+        <div class="chart-container" id="tier1InterruptsHeatmapContainer" style="display: none;">
+            <div class="chart-title">Interrupt CPU Affinity Heatmap - Per-CPU Distribution</div>
+            <canvas id="tier1InterruptsHeatmap"></canvas>
         </div>
         
         <!-- GPU Charts Section -->
@@ -740,6 +751,175 @@
                 }
             });
             }
+        }
+
+        // Interrupt Distribution Chart
+        if (chartData.tier1 && chartData.tier1.interrupts && Object.keys(chartData.tier1.interrupts).length > 0) {
+            document.getElementById('tier1InterruptsContainer').style.display = 'block';
+            
+            // Sort interrupts by total count to show top sources
+            const interruptEntries = Object.entries(chartData.tier1.interrupts);
+            const topInterrupts = interruptEntries
+                .sort((a, b) => {
+                    const sumA = a[1].rates.reduce((acc, val) => acc + (val || 0), 0);
+                    const sumB = b[1].rates.reduce((acc, val) => acc + (val || 0), 0);
+                    return sumB - sumA;
+                })
+                .slice(0, 10);  // Show top 10 interrupt sources
+            
+            const interruptDatasets = topInterrupts.map((entry, idx) => {
+                const [name, data] = entry;
+                const colors = [
+                    '#ff6384', '#36a2eb', '#ffce56', '#4bc0c0', 
+                    '#ff9f40', '#9966ff', '#c9cbcf', '#ff6384',
+                    '#8bc34a', '#ffc107'
+                ];
+                
+                return {
+                    label: `${name} (CPU${data.cpu})`,
+                    data: data.rates,
+                    borderColor: colors[idx % colors.length],
+                    borderWidth: 2,
+                    tension: 0.3,
+                    fill: false
+                };
+            });
+            
+            new Chart(document.getElementById('tier1InterruptsChart'), {
+                type: 'line',
+                data: {
+                    labels: chartData.timestamps,
+                    datasets: interruptDatasets
+                },
+                options: {
+                    ...commonOptions,
+                    scales: {
+                        ...commonOptions.scales,
+                        y: {
+                            ...commonOptions.scales.y,
+                            title: { display: true, text: 'Interrupts/sec', color: '#e0e0e0' },
+                            beginAtZero: true
+                        }
+                    },
+                    plugins: {
+                        ...commonOptions.plugins,
+                        tooltip: {
+                            ...commonOptions.plugins.tooltip,
+                            callbacks: {
+                                label: function(context) {
+                                    return context.dataset.label + ': ' + 
+                                           Math.round(context.parsed.y).toLocaleString() + ' interrupts/sec';
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Interrupt CPU Affinity Heatmap
+        if (chartData.tier1 && chartData.tier1.interrupts && Object.keys(chartData.tier1.interrupts).length > 0) {
+            document.getElementById('tier1InterruptsHeatmapContainer').style.display = 'block';
+            
+            // Get all interrupt sources and determine CPU count
+            const interruptEntries = Object.entries(chartData.tier1.interrupts);
+            let maxCpu = 0;
+            interruptEntries.forEach(([name, data]) => {
+                if (data.per_cpu && data.per_cpu.length > 0 && data.per_cpu[0]) {
+                    // per_cpu is array of arrays; get length of inner array (CPU cores)
+                    maxCpu = Math.max(maxCpu, data.per_cpu[0].length - 1);
+                }
+            });
+            const cpuCount = maxCpu + 1;
+            
+            // Sort interrupts by total count
+            const sortedInterrupts = interruptEntries
+                .sort((a, b) => {
+                    const sumA = a[1].rates.reduce((acc, val) => acc + (val || 0), 0);
+                    const sumB = b[1].rates.reduce((acc, val) => acc + (val || 0), 0);
+                    return sumB - sumA;
+                })
+                .slice(0, 10);  // Top 10 sources
+            
+            // Build heatmap data: average interrupts per CPU across all samples
+            const heatmapData = [];
+            sortedInterrupts.forEach(([name, data], yIndex) => {
+                if (data.per_cpu && data.per_cpu.length > 0) {
+                    // per_cpu is an array of arrays (one per sample timestamp)
+                    // Get the last sample's per_cpu distribution
+                    const latestPerCpu = data.per_cpu[data.per_cpu.length - 1];
+                    for (let cpu = 0; cpu < cpuCount; cpu++) {
+                        const value = latestPerCpu[cpu] || 0;
+                        heatmapData.push({
+                            x: `CPU${cpu}`,  // Use category label
+                            y: name,          // Use interrupt name
+                            v: value          // Interrupt count on this CPU
+                        });
+                    }
+                }
+            });
+            
+            // Find max value for color scaling
+            const maxValue = Math.max(...heatmapData.map(d => d.v), 1);
+            
+            new Chart(document.getElementById('tier1InterruptsHeatmap'), {
+                type: 'matrix',
+                data: {
+                    datasets: [{
+                        label: 'Interrupts',
+                        data: heatmapData,
+                        backgroundColor(context) {
+                            if (!context.dataset || !context.dataset.data) return 'rgba(255, 99, 132, 0.1)';
+                            const dataPoint = context.dataset.data[context.dataIndex];
+                            if (!dataPoint || dataPoint.v === undefined) return 'rgba(255, 99, 132, 0.1)';
+                            const value = dataPoint.v;
+                            const alpha = Math.max(0.1, value / maxValue);  // Minimum 10% opacity
+                            return `rgba(255, 99, 132, ${alpha})`;
+                        },
+                        borderWidth: 1,
+                        borderColor: '#333',
+                        width: ({ chart }) => (chart.chartArea || {}).width / cpuCount - 1,
+                        height: ({ chart }) => (chart.chartArea || {}).height / sortedInterrupts.length - 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                title() { return ''; },
+                                label(context) {
+                                    const v = context.dataset.data[context.dataIndex];
+                                    return `${v.y} on ${v.x}: ${v.v.toLocaleString()} interrupts`;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            type: 'category',
+                            position: 'bottom',
+                            labels: Array.from({length: cpuCount}, (_, i) => `CPU${i}`),
+                            ticks: {
+                                color: '#e0e0e0'
+                            },
+                            grid: { display: false },
+                            title: { display: true, text: 'CPU Core', color: '#e0e0e0' }
+                        },
+                        y: {
+                            type: 'category',
+                            position: 'left',
+                            labels: sortedInterrupts.map(item => item[0]),
+                            ticks: {
+                                color: '#e0e0e0'
+                            },
+                            grid: { display: false }
+                        }
+                    }
+                }
+            });
         }
         
         // GPU Usage & Frequency Chart (Dual Y-axis)

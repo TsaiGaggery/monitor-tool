@@ -37,27 +37,53 @@ class DataLogger:
             self.cleanup_old_data(days=auto_cleanup_days)
     
     def init_database(self):
-        """Initialize database schema."""
+        """Initialize database schema - UNIFIED schema matching SSH/Android format."""
         # Allow connection to be used from multiple threads
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         cursor = self.conn.cursor()
         
-        # Create monitoring data table
+        # Create monitoring data table - UNIFIED SCHEMA (matches linux_monitor_remote.sh)
+        # Stores RAW data for consistent processing across all modes
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS monitoring_data (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp DATETIME DEFAULT (datetime('now', 'localtime')),
-                cpu_usage REAL,
-                cpu_freq REAL,
-                cpu_temp REAL,
-                memory_usage REAL,
-                memory_percent REAL,
-                swap_usage REAL,
-                gpu_usage REAL,
-                gpu_temp REAL,
-                gpu_memory REAL,
-                npu_usage REAL,
-                data_json TEXT
+                timestamp INTEGER NOT NULL,
+                timestamp_ms INTEGER,
+                cpu_user INTEGER,
+                cpu_nice INTEGER,
+                cpu_sys INTEGER,
+                cpu_idle INTEGER,
+                cpu_iowait INTEGER,
+                cpu_irq INTEGER,
+                cpu_softirq INTEGER,
+                cpu_steal INTEGER,
+                per_core_raw TEXT,
+                per_core_freq_khz TEXT,
+                cpu_temp_millideg INTEGER,
+                mem_total_kb INTEGER,
+                mem_free_kb INTEGER,
+                mem_available_kb INTEGER,
+                gpu_driver TEXT,
+                gpu_freq_mhz INTEGER,
+                gpu_runtime_ms INTEGER,
+                gpu_memory_used_bytes INTEGER,
+                gpu_memory_total_bytes INTEGER,
+                npu_info TEXT,
+                net_rx_bytes INTEGER,
+                net_tx_bytes INTEGER,
+                disk_read_sectors INTEGER,
+                disk_write_sectors INTEGER,
+                ctxt INTEGER,
+                load_avg_1m REAL,
+                load_avg_5m REAL,
+                load_avg_15m REAL,
+                procs_running INTEGER,
+                procs_blocked INTEGER,
+                per_core_irq_pct TEXT,
+                per_core_softirq_pct TEXT,
+                interrupt_data TEXT,
+                monitor_cpu_utime INTEGER,
+                monitor_cpu_stime INTEGER
             )
         ''')
         
@@ -70,68 +96,189 @@ class DataLogger:
         self.conn.commit()
     
     def log_data(self, cpu_info: Dict, memory_info: Dict, 
-                 gpu_info: Dict = None, npu_info: Dict = None):
-        """Log monitoring data to database (thread-safe)."""
+                 gpu_info: Dict = None, npu_info: Dict = None, network_info: Dict = None, disk_info: Dict = None, tier1_info: Dict = None):
+        """Log monitoring data to database in RAW format (thread-safe).
+        
+        Stores RAW system data to match SSH/Android format for consistent export processing.
+        """
         with self.db_lock:
             try:
+                import time
+                import psutil
+                
                 cursor = self.conn.cursor()
                 
-                # Extract key metrics
-                cpu_usage = cpu_info.get('usage', {}).get('total', 0)
-                cpu_freq = cpu_info.get('frequency', {}).get('average', 0)
+                # Timestamp (Unix timestamp in seconds and milliseconds)
+                timestamp = int(time.time())
+                timestamp_ms = int(time.time() * 1000)
                 
-                # Get CPU temperature (first sensor, first core)
-                cpu_temp = 0
+                # CPU stats - get RAW values from /proc/stat
+                cpu_stats = psutil.cpu_times()
+                cpu_user = int(cpu_stats.user * 100)  # Convert to clock ticks (approximate)
+                cpu_nice = int(cpu_stats.nice * 100)
+                cpu_sys = int(cpu_stats.system * 100)
+                cpu_idle = int(cpu_stats.idle * 100)
+                cpu_iowait = int(getattr(cpu_stats, 'iowait', 0) * 100)
+                cpu_irq = int(getattr(cpu_stats, 'irq', 0) * 100)
+                cpu_softirq = int(getattr(cpu_stats, 'softirq', 0) * 100)
+                cpu_steal = int(getattr(cpu_stats, 'steal', 0) * 100)
+                
+                # Per-core raw CPU stats (JSON string matching bash format)
+                per_core_stats = []
+                for core_cpu_times in psutil.cpu_times(percpu=True):
+                    per_core_stats.append({
+                        'user': int(core_cpu_times.user * 100),
+                        'nice': int(core_cpu_times.nice * 100),
+                        'sys': int(core_cpu_times.system * 100),
+                        'idle': int(core_cpu_times.idle * 100),
+                        'iowait': int(getattr(core_cpu_times, 'iowait', 0) * 100),
+                        'irq': int(getattr(core_cpu_times, 'irq', 0) * 100),
+                        'softirq': int(getattr(core_cpu_times, 'softirq', 0) * 100),
+                        'steal': int(getattr(core_cpu_times, 'steal', 0) * 100)
+                    })
+                per_core_raw = json.dumps(per_core_stats)
+                
+                # Per-core frequencies (kHz) as comma-separated string
+                freq_data = cpu_info.get('frequency', {})
+                per_core_freq = freq_data.get('per_core', [])
+                # Convert MHz to kHz and format as comma-separated string
+                per_core_freq_khz = ','.join(str(int(f * 1000)) for f in per_core_freq)
+                
+                # CPU temperature (millidegrees)
+                cpu_temp_millideg = 0
                 temp_data = cpu_info.get('temperature', {})
                 if temp_data:
                     first_sensor = next(iter(temp_data.values()), [])
                     if first_sensor:
-                        cpu_temp = first_sensor[0].get('current', 0)
+                        cpu_temp_millideg = int(first_sensor[0].get('current', 0) * 1000)
                 
+                # Memory (kB)
                 mem = memory_info.get('memory', {})
-                memory_usage = mem.get('used', 0)
-                memory_percent = mem.get('percent', 0)
+                mem_total_kb = int(mem.get('total', 0) * 1024 * 1024)  # GB to kB
+                mem_free_kb = int(mem.get('free', 0) * 1024 * 1024)
+                mem_available_kb = int(mem.get('available', 0) * 1024 * 1024)
                 
-                swap = memory_info.get('swap', {})
-                swap_usage = swap.get('used', 0)
-                
-                # GPU data
-                gpu_usage = 0
-                gpu_temp = 0
-                gpu_memory = 0
+                # GPU info
+                gpu_driver = 'none'
+                gpu_freq_mhz = 0
+                gpu_runtime_ms = 0
+                gpu_memory_used_bytes = 0
+                gpu_memory_total_bytes = 0
                 if gpu_info and gpu_info.get('available'):
                     gpus = gpu_info.get('gpus', [])
                     if gpus:
                         gpu = gpus[0]
-                        gpu_usage = gpu.get('gpu_util', 0)
-                        gpu_temp = gpu.get('temperature', 0)
-                        gpu_memory = gpu.get('memory_used', 0)
+                        gpu_driver = 'local'  # Placeholder
+                        gpu_freq_mhz = int(gpu.get('gpu_clock', 0))
+                        gpu_memory_used_bytes = int(gpu.get('memory_used', 0) * 1024 * 1024)  # MB to bytes
+                        gpu_memory_total_bytes = int(gpu.get('memory_total', 0) * 1024 * 1024)
+                        # For runtime, we'd need to track cumulative GPU time (not implemented in local mode yet)
                 
-                # NPU data
-                npu_usage = 0
+                # NPU info (JSON string)
+                npu_info_str = 'none'
                 if npu_info and npu_info.get('available'):
-                    npu_usage = npu_info.get('utilization', 0)
+                    npu_info_str = json.dumps({'utilization': npu_info.get('utilization', 0)})
                 
-                # Store full data as JSON
-                full_data = {
-                    'cpu': cpu_info,
-                    'memory': memory_info,
-                    'gpu': gpu_info,
-                    'npu': npu_info
-                }
+                # Network stats (cumulative bytes)
+                net_rx_bytes = 0
+                net_tx_bytes = 0
+                if network_info:
+                    io_stats = network_info.get('io_stats', {})
+                    # psutil gives us rates, but we need cumulative - use net_io_counters
+                    net_io = psutil.net_io_counters()
+                    net_rx_bytes = net_io.bytes_recv
+                    net_tx_bytes = net_io.bytes_sent
                 
+                # Disk stats (cumulative sectors)
+                disk_read_sectors = 0
+                disk_write_sectors = 0
+                if disk_info:
+                    # psutil gives us bytes, convert to sectors (512 bytes each)
+                    disk_io = psutil.disk_io_counters()
+                    if disk_io:
+                        disk_read_sectors = disk_io.read_bytes // 512
+                        disk_write_sectors = disk_io.write_bytes // 512
+                
+                # Tier 1 metrics
+                if tier1_info:
+                    ctxt = tier1_info.get('context_switches', 0)
+                    
+                    load_avg_data = tier1_info.get('load_average', {})
+                    load_avg_1m = load_avg_data.get('1min', 0.0)
+                    load_avg_5m = load_avg_data.get('5min', 0.0)
+                    load_avg_15m = load_avg_data.get('15min', 0.0)
+                    
+                    procs_data = tier1_info.get('processes', {})
+                    procs_running = procs_data.get('running', 0)
+                    procs_blocked = procs_data.get('blocked', 0)
+                    
+                    # Per-core IRQ/SoftIRQ percentages as comma-separated strings
+                    per_core_irq_list = tier1_info.get('per_core_irq_pct', [])
+                    per_core_softirq_list = tier1_info.get('per_core_softirq_pct', [])
+                    per_core_irq_pct = ','.join(str(round(v, 2)) for v in per_core_irq_list)
+                    per_core_softirq_pct = ','.join(str(round(v, 2)) for v in per_core_softirq_list)
+                    
+                    # Interrupt distribution as JSON string
+                    interrupts = tier1_info.get('interrupts', {})
+                    interrupt_data = json.dumps(interrupts) if interrupts else 'null'
+                else:
+                    # Fallback to extracting from cpu_info (old behavior)
+                    stats = cpu_info.get('stats', {})
+                    ctxt = stats.get('ctx_switches', 0)
+                    
+                    load_avg = cpu_info.get('usage', {}).get('load_avg', (0, 0, 0))
+                    load_avg_1m = load_avg[0] if len(load_avg) > 0 else 0.0
+                    load_avg_5m = load_avg[1] if len(load_avg) > 1 else 0.0
+                    load_avg_15m = load_avg[2] if len(load_avg) > 2 else 0.0
+                    
+                    procs_running = 0
+                    procs_blocked = 0
+                    try:
+                        for proc in psutil.process_iter(['status']):
+                            status = proc.info.get('status', '')
+                            if status == psutil.STATUS_RUNNING:
+                                procs_running += 1
+                            elif status in [psutil.STATUS_DISK_SLEEP, psutil.STATUS_STOPPED]:
+                                procs_blocked += 1
+                    except:
+                        pass
+                    
+                    per_core_irq_pct = ''
+                    per_core_softirq_pct = ''
+                    interrupt_data = 'null'
+                
+                # Monitor CPU usage (from cpu_info)
+                monitor_cpu_usage = cpu_info.get('monitor_cpu_usage', 0)
+                # Convert percentage to ticks (approximate)
+                monitor_cpu_utime = int(monitor_cpu_usage * 100)
+                monitor_cpu_stime = 0
+                
+                # Insert into database
                 cursor.execute('''
                     INSERT INTO monitoring_data 
-                    (cpu_usage, cpu_freq, cpu_temp, memory_usage, memory_percent,
-                     swap_usage, gpu_usage, gpu_temp, gpu_memory, npu_usage, data_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (cpu_usage, cpu_freq, cpu_temp, memory_usage, memory_percent,
-                      swap_usage, gpu_usage, gpu_temp, gpu_memory, npu_usage,
-                      json.dumps(full_data)))
+                    (timestamp, timestamp_ms, cpu_user, cpu_nice, cpu_sys, cpu_idle, 
+                     cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz,
+                     cpu_temp_millideg, mem_total_kb, mem_free_kb, mem_available_kb,
+                     gpu_driver, gpu_freq_mhz, gpu_runtime_ms, gpu_memory_used_bytes, gpu_memory_total_bytes,
+                     npu_info, net_rx_bytes, net_tx_bytes, disk_read_sectors, disk_write_sectors,
+                     ctxt, load_avg_1m, load_avg_5m, load_avg_15m, procs_running, procs_blocked,
+                     per_core_irq_pct, per_core_softirq_pct, interrupt_data,
+                     monitor_cpu_utime, monitor_cpu_stime)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (timestamp, timestamp_ms, cpu_user, cpu_nice, cpu_sys, cpu_idle,
+                      cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz,
+                      cpu_temp_millideg, mem_total_kb, mem_free_kb, mem_available_kb,
+                      gpu_driver, gpu_freq_mhz, gpu_runtime_ms, gpu_memory_used_bytes, gpu_memory_total_bytes,
+                      npu_info_str, net_rx_bytes, net_tx_bytes, disk_read_sectors, disk_write_sectors,
+                      ctxt, load_avg_1m, load_avg_5m, load_avg_15m, procs_running, procs_blocked,
+                      per_core_irq_pct, per_core_softirq_pct, interrupt_data,
+                      monitor_cpu_utime, monitor_cpu_stime))
                 
                 self.conn.commit()
             except Exception as e:
                 print(f"Error logging data: {e}")
+                import traceback
+                traceback.print_exc()
     
     def get_recent_data(self, hours: int = 1, limit: int = 1000) -> List[Dict]:
         """Get recent monitoring data (thread-safe)."""

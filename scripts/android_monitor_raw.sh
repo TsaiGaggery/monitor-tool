@@ -47,7 +47,9 @@ init_database() {
         "    procs_running INTEGER," \
         "    procs_blocked INTEGER," \
         "    per_core_irq_pct TEXT," \
-        "    per_core_softirq_pct TEXT" \
+        "    per_core_softirq_pct TEXT," \
+        "    monitor_cpu_utime INTEGER," \
+        "    monitor_cpu_stime INTEGER" \
         ");" \
         "CREATE INDEX IF NOT EXISTS idx_timestamp ON raw_samples(timestamp);" \
         | sqlite3 "$DB_PATH"
@@ -97,6 +99,24 @@ get_cpu_temp_raw() {
     else
         echo "0"
     fi
+}
+
+# Get monitor CPU usage (utime and stime for this script and its children)
+get_monitor_cpu_usage() {
+    monitor_pid=$$
+    total_utime=0
+    total_stime=0
+    
+    # Get CPU ticks for this process and all children
+    for pid in $(ps -o pid= --ppid $monitor_pid 2>/dev/null; echo $monitor_pid); do
+        if [ -f "/proc/$pid/stat" ]; then
+            read -r _ _ _ _ _ _ _ _ _ _ _ _ _ utime stime _ < /proc/$pid/stat 2>/dev/null
+            total_utime=$((total_utime + utime))
+            total_stime=$((total_stime + stime))
+        fi
+    done
+    
+    echo "$total_utime,$total_stime"
 }
 
 # Get Tier 1 metrics (context switches, load average, process counts)
@@ -344,6 +364,9 @@ main() {
         # Tier 1 metrics (conditional)
         read ctxt load_1m load_5m load_15m procs_running procs_blocked per_core_irq_pct per_core_softirq_pct <<< $(get_tier1_metrics)
         
+        # Monitor CPU usage
+        read monitor_utime monitor_stime <<< $(get_monitor_cpu_usage | tr ',' ' ')
+        
         # Format per_core arrays for JSON (add brackets if not empty, otherwise use empty array)
         if [ -n "$per_core_irq_pct" ]; then
             tier1_irq_json="[$per_core_irq_pct]"
@@ -374,7 +397,7 @@ main() {
         TIMESTAMP_MS=$(date +%s%3N)
         
         # Insert into SQLite database (with proper escaping for JSON arrays)
-        sqlite3 "$DB_PATH" "INSERT INTO raw_samples (timestamp, timestamp_ms, cpu_user, cpu_nice, cpu_sys, cpu_idle, cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz, cpu_temp_millideg, mem_total_kb, mem_free_kb, mem_available_kb, gpu_driver, gpu_freq_mhz, gpu_runtime_ms, gpu_memory_used_bytes, gpu_memory_total_bytes, npu_info, net_rx_bytes, net_tx_bytes, disk_read_sectors, disk_write_sectors, ctxt, load_avg_1m, load_avg_5m, load_avg_15m, procs_running, procs_blocked, per_core_irq_pct, per_core_softirq_pct) VALUES ($TIMESTAMP, $TIMESTAMP_MS, $cpu_user, $cpu_nice, $cpu_sys, $cpu_idle, $cpu_iowait, $cpu_irq, $cpu_softirq, $cpu_steal, '$per_core_stats', '$per_core_freq', $cpu_temp, $mem_total, $mem_free, $mem_available, '$GPU_DRIVER', $gpu_freq, $gpu_runtime, $gpu_mem_used, $gpu_mem_total, 'none', $net_rx, $net_tx, $disk_read, $disk_write, $ctxt, $load_1m, $load_5m, $load_15m, $procs_running, $procs_blocked, '$per_core_irq_pct', '$per_core_softirq_pct');"
+        sqlite3 "$DB_PATH" "INSERT INTO raw_samples (timestamp, timestamp_ms, cpu_user, cpu_nice, cpu_sys, cpu_idle, cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz, cpu_temp_millideg, mem_total_kb, mem_free_kb, mem_available_kb, gpu_driver, gpu_freq_mhz, gpu_runtime_ms, gpu_memory_used_bytes, gpu_memory_total_bytes, npu_info, net_rx_bytes, net_tx_bytes, disk_read_sectors, disk_write_sectors, ctxt, load_avg_1m, load_avg_5m, load_avg_15m, procs_running, procs_blocked, per_core_irq_pct, per_core_softirq_pct, monitor_cpu_utime, monitor_cpu_stime) VALUES ($TIMESTAMP, $TIMESTAMP_MS, $cpu_user, $cpu_nice, $cpu_sys, $cpu_idle, $cpu_iowait, $cpu_irq, $cpu_softirq, $cpu_steal, '$per_core_stats', '$per_core_freq', $cpu_temp, $mem_total, $mem_free, $mem_available, '$GPU_DRIVER', $gpu_freq, $gpu_runtime, $gpu_mem_used, $gpu_mem_total, 'none', $net_rx, $net_tx, $disk_read, $disk_write, $ctxt, $load_1m, $load_5m, $load_15m, $procs_running, $procs_blocked, '$per_core_irq_pct', '$per_core_softirq_pct', $monitor_utime, $monitor_stime);"
         
         # Output JSON - single line with printf (no line wrapping issues)
         # Send RAW gpu_runtime_ms AND timestamp_ms for accurate host-side calculation
@@ -383,7 +406,7 @@ main() {
         # disk_read_sectors/disk_write_sectors: CUMULATIVE values (host calculates delta)
         # net_rx_bytes/net_tx_bytes: CUMULATIVE values (host calculates delta)
         # Tier 1 fields included conditionally (null values if disabled)
-        printf '{"timestamp_ms":%s,"cpu_raw":{"user":%d,"nice":%d,"sys":%d,"idle":%d,"iowait":%d,"irq":%d,"softirq":%d,"steal":%d},"per_core_raw":[%s],"per_core_freq_khz":[%s],"cpu_temp_millideg":%d,"mem_total_kb":%d,"mem_free_kb":%d,"mem_available_kb":%d,"gpu_driver":"%s","gpu_freq_mhz":%d,"gpu_runtime_ms":%d,"gpu_memory_used_bytes":%d,"gpu_memory_total_bytes":%d,"npu_info":"%s","net_rx_bytes":%d,"net_tx_bytes":%d,"disk_read_sectors":%d,"disk_write_sectors":%d,"ctxt":%s,"load_avg_1m":%s,"load_avg_5m":%s,"load_avg_15m":%s,"procs_running":%s,"procs_blocked":%s,"per_core_irq_pct":%s,"per_core_softirq_pct":%s}\n' \
+        printf '{"timestamp_ms":%s,"cpu_raw":{"user":%d,"nice":%d,"sys":%d,"idle":%d,"iowait":%d,"irq":%d,"softirq":%d,"steal":%d},"per_core_raw":[%s],"per_core_freq_khz":[%s],"cpu_temp_millideg":%d,"mem_total_kb":%d,"mem_free_kb":%d,"mem_available_kb":%d,"gpu_driver":"%s","gpu_freq_mhz":%d,"gpu_runtime_ms":%d,"gpu_memory_used_bytes":%d,"gpu_memory_total_bytes":%d,"npu_info":"%s","net_rx_bytes":%d,"net_tx_bytes":%d,"disk_read_sectors":%d,"disk_write_sectors":%d,"ctxt":%s,"load_avg_1m":%s,"load_avg_5m":%s,"load_avg_15m":%s,"procs_running":%s,"procs_blocked":%s,"per_core_irq_pct":%s,"per_core_softirq_pct":%s,"monitor_cpu_utime":%d,"monitor_cpu_stime":%d}\n' \
             "$TIMESTAMP_MS" \
             "$cpu_user" "$cpu_nice" "$cpu_sys" "$cpu_idle" "$cpu_iowait" "$cpu_irq" "$cpu_softirq" "$cpu_steal" \
             "$per_core_stats" "$per_core_freq" "$cpu_temp" \
@@ -394,7 +417,8 @@ main() {
             "$net_rx" "$net_tx" \
             "$disk_read" "$disk_write" \
             "$ctxt" "$load_1m" "$load_5m" "$load_15m" "$procs_running" "$procs_blocked" \
-            "$tier1_irq_json" "$tier1_softirq_json"
+            "$tier1_irq_json" "$tier1_softirq_json" \
+            "$monitor_utime" "$monitor_stime"
         
         # Sleep until next interval
         LOOP_END=$(date +%s)
