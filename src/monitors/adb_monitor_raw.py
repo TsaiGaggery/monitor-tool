@@ -12,16 +12,18 @@ from typing import Dict, Optional
 class ADBMonitorRaw:
     """Monitor Android device via ADB - processes raw data."""
     
-    def __init__(self, device_ip: str, port: int = 5555):
+    def __init__(self, device_ip: str, port: int = 5555, enable_tier1: bool = False):
         """Initialize ADB monitor.
         
         Args:
             device_ip: Android device IP address
             port: ADB port (default: 5555)
+            enable_tier1: Enable Tier 1 metrics (context switches, load avg, etc.)
         """
         self.device_ip = device_ip
         self.port = port
         self.device_id = f"{device_ip}:{port}"
+        self.enable_tier1 = enable_tier1
         
         # Latest data from Android (thread-safe)
         self._data_lock = threading.Lock()
@@ -324,8 +326,10 @@ class ADBMonitorRaw:
         device_script = "/data/local/tmp/android_monitor_raw.sh"
         
         # Start ADB shell command that streams JSON data
+        # Second parameter enables Tier 1 metrics (ctxt, load avg, proc counts, irq%)
+        tier1_param = "1" if self.enable_tier1 else "0"
         self._stream_process = subprocess.Popen(
-            ["adb", "-s", self.device_id, "shell", "sh", device_script, "1"],
+            ["adb", "-s", self.device_id, "shell", "sh", device_script, "1", tier1_param],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

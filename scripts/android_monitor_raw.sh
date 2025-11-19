@@ -8,8 +8,11 @@ INTERVAL=${1:-1}
 ENABLE_TIER1=${2:-0}  # 0=disabled, 1=enabled (Tier 1 metrics: ctxt, load, procs, irq%)
 DB_PATH="/data/local/tmp/monitor.db"
 
-# Initialize SQLite database
+# Initialize database (recreate to ensure schema is up to date)
 init_database() {
+    # Remove old database if it exists to avoid schema mismatch
+    rm -f "$DB_PATH"
+    
     # Use printf instead of heredoc since script is piped through ADB
     printf "%s\n" \
         "CREATE TABLE IF NOT EXISTS raw_samples (" \
@@ -131,8 +134,12 @@ get_tier1_metrics() {
     # Context switches (total system-wide)
     ctxt=$(awk '/^ctxt / {print $2}' /proc/stat)
     
-    # Load average (1m, 5m, 15m)
-    read load_1m load_5m load_15m procs_running_slash_total < <(cat /proc/loadavg)
+    # Load average (1m, 5m, 15m) - Android shell compatible
+    loadavg_line=$(cat /proc/loadavg)
+    load_1m=$(echo "$loadavg_line" | awk '{print $1}')
+    load_5m=$(echo "$loadavg_line" | awk '{print $2}')
+    load_15m=$(echo "$loadavg_line" | awk '{print $3}')
+    procs_running_slash_total=$(echo "$loadavg_line" | awk '{print $4}')
     procs_total=$(echo "$procs_running_slash_total" | cut -d'/' -f2)
     
     # Process counts (currently running, blocked)

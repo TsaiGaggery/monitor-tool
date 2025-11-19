@@ -335,17 +335,19 @@ class LocalDataSource(MonitorDataSource):
 class AndroidDataSource(MonitorDataSource):
     """Android device data source via ADB (raw data version)."""
     
-    def __init__(self, device_ip: str, port: int = 5555):
+    def __init__(self, device_ip: str, port: int = 5555, enable_tier1: bool = False):
         """Initialize Android data source.
         
         Args:
             device_ip: Android device IP address
             port: ADB port (default: 5555)
+            enable_tier1: Enable Tier 1 metrics (context switches, load avg, etc.)
         """
         from monitors.adb_monitor_raw import ADBMonitorRaw
         
         self.device_ip = device_ip
         self.port = port
+        self.enable_tier1 = enable_tier1
         self.adb_monitor = None
         self._connected = False
     
@@ -355,7 +357,7 @@ class AndroidDataSource(MonitorDataSource):
             from monitors.adb_monitor_raw import ADBMonitorRaw
             
             # ADBMonitorRaw automatically starts streaming in __init__
-            self.adb_monitor = ADBMonitorRaw(self.device_ip, self.port)
+            self.adb_monitor = ADBMonitorRaw(self.device_ip, self.port, enable_tier1=self.enable_tier1)
             self._connected = True
             return True
         except Exception as e:
