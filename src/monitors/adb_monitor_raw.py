@@ -129,6 +129,27 @@ class ADBMonitorRaw:
             
             avg_freq = sum(per_core_freq) / len(per_core_freq) if per_core_freq else 0
             
+            # CPU power (Intel RAPL - calculate from energy delta)
+            cpu_power_uj = raw_data.get('cpu_power_uj', 0)
+            prev_cpu_power_uj = prev.get('cpu_power_uj', cpu_power_uj)
+            timestamp_ms = raw_data.get('timestamp_ms', 0)
+            
+            cpu_power_watts = 0.0
+            if cpu_power_uj > 0 and timestamp_ms > 0:
+                # Calculate energy delta (handle counter wrap-around)
+                energy_delta_uj = cpu_power_uj - prev_cpu_power_uj
+                if energy_delta_uj < 0:
+                    # Counter wrapped around (assume 32-bit counter)
+                    energy_delta_uj += (1 << 32)
+                
+                # Calculate time delta in seconds
+                time_delta_ms = timestamp_ms - prev.get('timestamp_ms', timestamp_ms)
+                time_delta_sec = time_delta_ms / 1000.0 if time_delta_ms > 0 else 1.0
+                
+                # Power (Watts) = Energy (J) / Time (s)
+                # Energy (J) = energy_uj / 1,000,000
+                cpu_power_watts = (energy_delta_uj / 1_000_000.0) / time_delta_sec
+            
             self._cpu_info = {
                 'cpu_count': cpu_count,
                 'physical_count': cpu_count,
@@ -147,7 +168,8 @@ class ADBMonitorRaw:
                         'high': 100.0,
                         'critical': 105.0
                     }]
-                } if raw_data['cpu_temp_millideg'] > 0 else {}
+                } if raw_data['cpu_temp_millideg'] > 0 else {},
+                'power_watts': cpu_power_watts
             }
             
             # Memory info
@@ -180,7 +202,6 @@ class ADBMonitorRaw:
             # Support both i915 (runtime) and Xe (idle_residency) drivers
             gpu_driver = raw_data.get('gpu_driver', 'i915')  # Default to i915 for backward compatibility
             gpu_runtime_ms = raw_data.get('gpu_runtime_ms', 0)
-            timestamp_ms = raw_data.get('timestamp_ms', 0)
             prev_gpu_runtime_ms = prev.get('gpu_runtime_ms', gpu_runtime_ms)
             prev_timestamp_ms = prev.get('timestamp_ms', timestamp_ms)
             

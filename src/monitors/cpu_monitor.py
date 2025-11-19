@@ -16,6 +16,21 @@ class CPUMonitor:
         # Track the monitor process itself
         self.monitor_process = psutil.Process()
         
+        # Intel RAPL power monitoring
+        self._prev_energy_uj = None
+        self._prev_energy_time = None
+        self._rapl_available = self._check_rapl_available()
+    
+    def _check_rapl_available(self) -> bool:
+        """Check if Intel RAPL is available for power monitoring."""
+        try:
+            rapl_path = '/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj'
+            with open(rapl_path, 'r') as f:
+                f.read()
+            return True
+        except (FileNotFoundError, PermissionError):
+            return False
+        
     def get_usage(self) -> Dict:
         """Get CPU usage statistics."""
         return {
@@ -120,6 +135,57 @@ class CPUMonitor:
         
         return per_core_details
     
+    def get_power(self) -> Optional[float]:
+        """Get CPU package power consumption in Watts using Intel RAPL.
+        
+        Returns:
+            Power in Watts, or None if not available
+        """
+        if not self._rapl_available:
+            return None
+        
+        try:
+            import time
+            rapl_path = '/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj'
+            
+            with open(rapl_path, 'r') as f:
+                current_energy_uj = int(f.read().strip())
+            
+            current_time = time.time()
+            
+            # Need two samples to calculate power
+            if self._prev_energy_uj is not None and self._prev_energy_time is not None:
+                # Calculate energy delta (handle counter wrap-around)
+                # RAPL counter is 32-bit and wraps around
+                with open('/sys/class/powercap/intel-rapl/intel-rapl:0/max_energy_range_uj', 'r') as f:
+                    max_range = int(f.read().strip())
+                
+                energy_delta_uj = current_energy_uj - self._prev_energy_uj
+                if energy_delta_uj < 0:  # Counter wrapped
+                    energy_delta_uj += max_range
+                
+                time_delta_sec = current_time - self._prev_energy_time
+                
+                if time_delta_sec > 0:
+                    # Power (Watts) = Energy (Joules) / Time (seconds)
+                    # Convert microjoules to joules: uj / 1,000,000
+                    power_watts = (energy_delta_uj / 1_000_000) / time_delta_sec
+                    
+                    # Store current values for next calculation
+                    self._prev_energy_uj = current_energy_uj
+                    self._prev_energy_time = current_time
+                    
+                    return power_watts
+            
+            # First sample or time delta is 0
+            self._prev_energy_uj = current_energy_uj
+            self._prev_energy_time = current_time
+            return None
+            
+        except Exception as e:
+            print(f"Error reading CPU power: {e}")
+            return None
+    
     def get_all_info(self) -> Dict:
         """Get all CPU monitoring information."""
         # Get monitor process CPU usage (percentage across all cores)
@@ -138,6 +204,9 @@ class CPUMonitor:
         except Exception as e:
             monitor_cpu_usage = 0.0
         
+        # Get CPU power consumption
+        cpu_power = self.get_power()
+        
         return {
             'usage': self.get_usage(),
             'frequency': self.get_frequency(),
@@ -146,7 +215,8 @@ class CPUMonitor:
             'per_core': self.get_per_core_details(),
             'cpu_count': self.cpu_count,
             'physical_count': self.physical_count,
-            'monitor_cpu_usage': monitor_cpu_usage
+            'monitor_cpu_usage': monitor_cpu_usage,
+            'power_watts': cpu_power  # CPU package power in Watts (Intel RAPL)
         }
 
 

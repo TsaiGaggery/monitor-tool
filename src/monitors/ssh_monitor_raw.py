@@ -310,11 +310,16 @@ class SSHMonitorRaw:
         
         gpu_freq_mhz = raw_data.get('gpu_freq_mhz', 0)
         gpu_runtime_ms = raw_data.get('gpu_runtime_ms', 0)
+        gpu_temp_celsius = raw_data.get('gpu_temp_celsius', 0)
         timestamp_ms = raw_data.get('timestamp_ms', 0)
         
         # Calculate GPU utilization from runtime delta
         gpu_util = 0
-        if self._prev_gpu_runtime_ms is not None and self._prev_gpu_timestamp_ms is not None:
+        if gpu_driver == 'nvidia':
+            # For NVIDIA: gpu_runtime_ms is actually the utilization % (direct value from nvidia-smi)
+            # No delta calculation needed
+            gpu_util = int(gpu_runtime_ms)
+        elif self._prev_gpu_runtime_ms is not None and self._prev_gpu_timestamp_ms is not None:
             runtime_delta = gpu_runtime_ms - self._prev_gpu_runtime_ms
             time_delta = timestamp_ms - self._prev_gpu_timestamp_ms
             
@@ -329,9 +334,8 @@ class SSHMonitorRaw:
                     # Utilization = 100 - (rc6_delta / time_delta * 100)
                     idle_percentage = (runtime_delta / time_delta) * 100
                     gpu_util = int(max(0, min(100, 100 - idle_percentage)))
-                # TODO: NVIDIA support would need different calculation
         
-        # Update previous values for next calculation
+        # Update previous values for next calculation (not needed for NVIDIA, but keep for consistency)
         self._prev_gpu_runtime_ms = gpu_runtime_ms
         self._prev_gpu_timestamp_ms = timestamp_ms
         
@@ -341,14 +345,20 @@ class SSHMonitorRaw:
         gpu_mem_used_mb = gpu_mem_used_bytes // (1024 * 1024)
         gpu_mem_total_mb = gpu_mem_total_bytes // (1024 * 1024)
         
+        # Calculate memory utilization percentage
+        mem_util = 0
+        if gpu_mem_total_mb > 0:
+            mem_util = int((gpu_mem_used_mb / gpu_mem_total_mb) * 100)
+        
         return {
             'available': gpu_driver not in ['none', '', 'N/A'],  # Check driver, not freq (freq can be 0 when idle)
             'name': f'Remote GPU ({gpu_driver.upper()})',
-            'gpu_util': gpu_util,  # Calculated on host from runtime delta
+            'gpu_util': gpu_util,  # Calculated on host from runtime delta (or direct for NVIDIA)
+            'memory_util': mem_util,
             'gpu_clock': gpu_freq_mhz,
             'memory_used': gpu_mem_used_mb,
             'memory_total': gpu_mem_total_mb,
-            'temperature': 0
+            'temperature': gpu_temp_celsius
         }
     
     def _calculate_npu_info(self, raw_data: Dict[str, Any], prev: Dict[str, Any]) -> Optional[Dict[str, Any]]:

@@ -14,6 +14,7 @@ from storage import DataLogger, DataExporter
 from ui.widgets.plot_widget import MonitorPlotWidget, MultiLinePlotWidget
 from ui.widgets.control_panel import ControlPanel
 from ui.widgets.info_card import InfoCard
+from ui.widgets.temperature_bar import TemperaturePanel
 from ui.styles import apply_dark_theme, CHART_COLORS
 
 import time
@@ -260,6 +261,10 @@ class MainWindow(QMainWindow):
         charts_group.setLayout(charts_layout)
         layout.addWidget(charts_group)
         
+        # Temperature monitoring panel
+        self.temp_panel = TemperaturePanel()
+        layout.addWidget(self.temp_panel)
+        
         return widget
     
     def create_cpu_tab(self) -> QWidget:
@@ -275,12 +280,14 @@ class MainWindow(QMainWindow):
         self.cpu_cores_label = QLabel(f"Cores: {cpu_count}")
         self.cpu_freq_label = QLabel("Frequency: -")
         self.cpu_temp_label = QLabel("Temperature: -")
+        self.cpu_power_label = QLabel("Power: -")
         self.cpu_governor_label = QLabel("Governor: -")
         
         info_layout.addWidget(self.cpu_cores_label, 0, 0)
         info_layout.addWidget(self.cpu_freq_label, 0, 1)
         info_layout.addWidget(self.cpu_temp_label, 1, 0)
-        info_layout.addWidget(self.cpu_governor_label, 1, 1)
+        info_layout.addWidget(self.cpu_power_label, 1, 1)
+        info_layout.addWidget(self.cpu_governor_label, 2, 0, 1, 2)
         
         info_group.setLayout(info_layout)
         layout.addWidget(info_group)
@@ -292,6 +299,10 @@ class MainWindow(QMainWindow):
         # CPU frequency plot
         self.cpu_freq_plot = MonitorPlotWidget("CPU Frequency (MHz)", y_label="Frequency (MHz)", max_points=90)
         layout.addWidget(self.cpu_freq_plot)
+        
+        # CPU power plot (Intel RAPL)
+        self.cpu_power_plot = MonitorPlotWidget("CPU Power Consumption (W)", y_label="Power (W)", max_points=90)
+        layout.addWidget(self.cpu_power_plot)
         
         return widget
     
@@ -559,6 +570,13 @@ class MainWindow(QMainWindow):
                 temp = first_sensor[0]['current']
                 self.cpu_temp_label.setText(f"Temperature: {temp:.1f}°C")
         
+        # CPU power consumption (Intel RAPL)
+        cpu_power = cpu_info.get('power_watts')
+        if cpu_power is not None:
+            self.cpu_power_label.setText(f"Power: {cpu_power:.1f} W")
+        else:
+            self.cpu_power_label.setText("Power: N/A")
+        
         # CPU governor (skip in ADB mode)
         if self.freq_controller:
             governor = self.freq_controller.get_current_cpu_governor()
@@ -603,8 +621,9 @@ class MainWindow(QMainWindow):
                     
                     mem_used = gpu.get('memory_used', 0)
                     mem_total = gpu.get('memory_total', 0)
+                    mem_util = gpu.get('memory_util', 0)
                     if mem_total > 0:
-                        self.gpu_mem_label.setText(f"{mem_used:.0f} / {mem_total:.0f} MB")
+                        self.gpu_mem_label.setText(f"{mem_used:.0f} / {mem_total:.0f} MB ({mem_util}%)")
                     else:
                         self.gpu_mem_label.setText("N/A (driver required)")
                     
@@ -713,8 +732,33 @@ class MainWindow(QMainWindow):
                 freq = npu_info.get('frequency', 0)
                 self.overview_npu_plot.update_data(util, freq, current_time)
         
+        # Update temperature panel
+        cpu_temp = 0
+        if cpu_info['temperature']:
+            first_sensor = next(iter(cpu_info['temperature'].values()), [])
+            if first_sensor:
+                cpu_temp = first_sensor[0]['current']
+        
+        gpu_temp = 0
+        if gpu_info.get('available') and gpu_info['gpus']:
+            gpu_temp = gpu_info['gpus'][0].get('temperature', 0)
+        
+        disk_temp = 0  # TODO: Add disk temperature monitoring if available
+        
+        npu_temp = 0
+        if npu_info.get('available'):
+            npu_temp = npu_info.get('temperature', 0)
+        
+        self.temp_panel.update_temperatures(cpu_temp, gpu_temp, disk_temp, npu_temp)
+        
         self.cpu_usage_plot.update_data(cpu_usage, current_time)
         self.cpu_freq_plot.update_data(cpu_freq, current_time)
+        
+        # Update CPU power plot if available
+        cpu_power = cpu_info.get('power_watts')
+        if cpu_power is not None:
+            self.cpu_power_plot.update_data(cpu_power, current_time)
+        
         self.memory_usage_plot.update_data(mem['percent'], current_time)
         self.network_speed_plot.update_data(upload_speed_kb, download_speed_kb, current_time)
         self.disk_io_plot.update_data(read_speed_mb, write_speed_mb, current_time)
@@ -779,9 +823,13 @@ class MainWindow(QMainWindow):
         monitor_cpu = cpu_info.get('monitor_cpu_usage', 0)
         monitor_cpu_str = f"Monitor: {monitor_cpu:.1f}%" if monitor_cpu > 0 else "Monitor: -"
         
+        # CPU power consumption
+        cpu_power = cpu_info.get('power_watts')
+        cpu_power_str = f"{cpu_power:.1f}W" if cpu_power is not None else "-"
+        
         status_msg = (
             f"Last update: {time.strftime('%H:%M:%S')} | "
-            f"CPU: {cpu_usage:.1f}% | "
+            f"CPU: {cpu_usage:.1f}% ({cpu_power_str}) | "
             f"Mem: {mem['percent']:.1f}% | "
             f"Net: ↑{format_speed_short(upload_speed_bytes)}/↓{format_speed_short(download_speed_bytes)} | "
             f"Disk: R{read_speed_mb:.1f}/W{write_speed_mb:.1f} MB/s | "

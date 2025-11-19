@@ -277,10 +277,31 @@ get_memory_raw() {
 # Returns: driver freq_mhz runtime_ms mem_used_bytes mem_total_bytes
 # For Xe: runtime_ms is idle_residency_ms (host will calculate util = 100 - idle%)
 # For i915: runtime_ms is rc6_residency_ms (host will calculate util = 100 - rc6%)
+# For NVIDIA: runtime_ms is GPU utilization % (direct value, not idle)
 get_gpu_info() {
     
-    # Try NVIDIA first (not implemented yet, would need raw counter)
-    # TODO: NVIDIA support for raw counters
+    # Try NVIDIA first using nvidia-smi
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        # Check if NVIDIA driver is loaded and working
+        if nvidia_output=$(nvidia-smi --query-gpu=utilization.gpu,clocks.current.graphics,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits 2>/dev/null); then
+            # Parse output: utilization.gpu, clocks.graphics, memory.used, memory.total, temperature
+            gpu_util=$(echo "$nvidia_output" | awk -F',' '{print $1}' | tr -d ' ')
+            gpu_freq=$(echo "$nvidia_output" | awk -F',' '{print $2}' | tr -d ' ')
+            mem_used_mb=$(echo "$nvidia_output" | awk -F',' '{print $3}' | tr -d ' ')
+            mem_total_mb=$(echo "$nvidia_output" | awk -F',' '{print $4}' | tr -d ' ')
+            gpu_temp=$(echo "$nvidia_output" | awk -F',' '{print $5}' | tr -d ' ')
+            
+            # Convert to bytes
+            mem_used_bytes=$((mem_used_mb * 1024 * 1024))
+            mem_total_bytes=$((mem_total_mb * 1024 * 1024))
+            
+            # For NVIDIA, we return utilization % as "runtime" (special case)
+            # The client will recognize "nvidia" driver and use the value directly
+            # Format: driver freq_mhz utilization% mem_used_bytes mem_total_bytes temp_celsius
+            echo "nvidia ${gpu_freq} ${gpu_util} ${mem_used_bytes} ${mem_total_bytes} ${gpu_temp}"
+            return
+        fi
+    fi
     
     # Check for Intel GPU (i915 or Xe)
     for card in /sys/class/drm/card[0-9]; do
@@ -323,19 +344,26 @@ get_gpu_info() {
                     done
                     
                     # Get GPU memory usage
-                    # Note: For integrated GPUs, accurate memory tracking is not available
-                    # Per-process fdinfo values are VIRTUAL addresses and summing them
-                    # leads to massive over-counting due to shared buffers
-                    # System-wide metrics are not exposed by Xe driver
-                    # Best we can do: report 0 (memory is shared with system RAM)
+                    # For discrete Arc GPUs, try to get VRAM size
                     mem_used_bytes=0
+                    mem_total_bytes=0
                     
-                    # Get total system memory (integrated GPU uses system RAM)
-                    mem_total_kb=$(grep "^MemTotal:" /proc/meminfo 2>/dev/null | awk '{print $2}')
-                    mem_total_bytes=$((mem_total_kb * 1024))
+                    # Check for discrete GPU with local memory
+                    local_mem_file="/sys/class/drm/card${card_num}/device/local_memory_size_bytes"
+                    if [ -f "$local_mem_file" ]; then
+                        # Discrete Intel Arc GPU - has dedicated VRAM
+                        mem_total_bytes=$(cat "$local_mem_file" 2>/dev/null || echo "0")
+                        # Used memory not available without intel_gpu_top, report 0
+                        mem_used_bytes=0
+                    else
+                        # Integrated GPU - shares system RAM
+                        mem_total_kb=$(grep "^MemTotal:" /proc/meminfo 2>/dev/null | awk '{print $2}')
+                        mem_total_bytes=$((mem_total_kb * 1024))
+                        mem_used_bytes=0
+                    fi
                     
-                    # Return: driver freq_mhz runtime_ms mem_used_bytes mem_total_bytes
-                    echo "xe ${xe_freq} ${xe_idle} ${mem_used_bytes} ${mem_total_bytes}"
+                    # Return: driver freq_mhz runtime_ms mem_used_bytes mem_total_bytes temp_celsius
+                    echo "xe ${xe_freq} ${xe_idle} ${mem_used_bytes} ${mem_total_bytes} 0"
                     return
                 fi
                 
@@ -349,19 +377,25 @@ get_gpu_info() {
                     i915_freq=$(cat "$i915_freq_path" 2>/dev/null || echo "0")
                     
                     # Get GPU memory usage
-                    # Note: For integrated GPUs, accurate memory tracking is not available
-                    # Per-process fdinfo values are VIRTUAL addresses and summing them
-                    # leads to massive over-counting due to shared buffers
-                    # System-wide metrics are not exposed by i915 driver for integrated GPUs
-                    # Best we can do: report 0 (memory is shared with system RAM)
+                    # For discrete Arc GPUs, try to get VRAM size
                     mem_used_bytes=0
+                    mem_total_bytes=0
                     
-                    # Get total system memory (integrated GPU uses system RAM)
-                    mem_total_kb=$(grep "^MemTotal:" /proc/meminfo 2>/dev/null | awk '{print $2}')
-                    mem_total_bytes=$((mem_total_kb * 1024))
+                    # Check for discrete GPU with local memory
+                    local_mem_file="/sys/class/drm/card${card_num}/device/local_memory_size_bytes"
+                    if [ -f "$local_mem_file" ]; then
+                        # Discrete Intel Arc GPU - has dedicated VRAM
+                        mem_total_bytes=$(cat "$local_mem_file" 2>/dev/null || echo "0")
+                        mem_used_bytes=0
+                    else
+                        # Integrated GPU - shares system RAM
+                        mem_total_kb=$(grep "^MemTotal:" /proc/meminfo 2>/dev/null | awk '{print $2}')
+                        mem_total_bytes=$((mem_total_kb * 1024))
+                        mem_used_bytes=0
+                    fi
                     
-                    # Return: driver freq_mhz runtime_ms mem_used_bytes mem_total_bytes
-                    echo "i915 ${i915_freq} ${i915_rc6} ${mem_used_bytes} ${mem_total_bytes}"
+                    # Return: driver freq_mhz runtime_ms mem_used_bytes mem_total_bytes temp_celsius
+                    echo "i915 ${i915_freq} ${i915_rc6} ${mem_used_bytes} ${mem_total_bytes} 0"
                     return
                 fi
             fi
@@ -369,7 +403,7 @@ get_gpu_info() {
     done
     
     # No GPU found
-    echo "none 0 0 0 0"
+    echo "none 0 0 0 0 0"
 }
 
 # Get NPU info (Intel NPU/VPU)
@@ -524,7 +558,7 @@ main() {
         fi
         
         # GPU/NPU info
-        read gpu_driver gpu_freq gpu_runtime gpu_mem_used gpu_mem_total <<< $(get_gpu_info)
+        read gpu_driver gpu_freq gpu_runtime gpu_mem_used gpu_mem_total gpu_temp <<< $(get_gpu_info)
         npu_info=$(get_npu_info "$TIMESTAMP_MS")
         
         # Only update PREV_NPU_BUSY_US as NPU still calculates on remote

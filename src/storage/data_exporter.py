@@ -34,6 +34,13 @@ class DataExporter:
         # Track session time range for Android DB exports
         self.session_start_timestamp = int(self.start_time.timestamp())
         
+        # Cache for database queries (to avoid repeated expensive queries)
+        self._db_cache = {
+            'ssh': None,
+            'android': None,
+            'local': None
+        }
+        
         # Create date-based subdirectory (YYYY-MM-DD format)
         date_str = self.start_time.strftime('%Y-%m-%d')
         self.output_dir = self.base_output_dir / date_str
@@ -46,6 +53,16 @@ class DataExporter:
             data: Dictionary containing monitoring data with timestamp
         """
         self.session_data.append(data.copy())
+        # Invalidate cache when new data is added
+        self._invalidate_cache()
+    
+    def _invalidate_cache(self):
+        """Invalidate all database caches when new data arrives."""
+        self._db_cache = {
+            'ssh': None,
+            'android': None,
+            'local': None
+        }
     
     def _pull_ssh_db_data(self) -> List[Dict]:
         """Pull data from remote Linux SQLite database for export.
@@ -53,6 +70,11 @@ class DataExporter:
         Returns:
             List of processed data samples from remote Linux DB
         """
+        # Return cached data if available
+        if self._db_cache['ssh'] is not None:
+            print(f"📦 Using cached SSH database data ({len(self._db_cache['ssh'])} samples)")
+            return self._db_cache['ssh']
+        
         # Check if data source is SSH-based (RemoteLinuxDataSource)
         if self.data_source is None:
             return []
@@ -141,6 +163,7 @@ class DataExporter:
                     'per_core_raw': json.loads(f"[{row['per_core_raw']}]") if row.get('per_core_raw') else [],
                     'per_core_freq_khz': json.loads(f"[{row['per_core_freq_khz']}]") if row.get('per_core_freq_khz') else [],
                     'cpu_temp_millideg': row.get('cpu_temp_millideg', 0),
+                    'cpu_power_uj': row.get('cpu_power_uj', 0),
                     'mem_total_kb': row['mem_total_kb'],
                     'mem_free_kb': row['mem_free_kb'],
                     'mem_available_kb': row['mem_available_kb'],
@@ -178,6 +201,8 @@ class DataExporter:
                 
                 prev_raw = raw_data
             
+            # Cache the result before returning
+            self._db_cache['ssh'] = processed_samples
             return processed_samples
             
         except Exception as e:
@@ -192,6 +217,11 @@ class DataExporter:
         Returns:
             List of processed data samples from local DB (~/.monitor-tool/monitor_data.db)
         """
+        # Return cached data if available
+        if self._db_cache['local'] is not None:
+            print(f"📦 Using cached local database data ({len(self._db_cache['local'])} samples)")
+            return self._db_cache['local']
+        
         import os
         import subprocess
         import json
@@ -218,7 +248,7 @@ class DataExporter:
                 ['sqlite3', '-json', local_db_path, sql_query],
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=120  # Increase timeout to 120 seconds for large databases
             )
             
             if result.returncode != 0:
@@ -314,6 +344,8 @@ class DataExporter:
                 
                 prev_raw = raw_data
             
+            # Cache the result before returning
+            self._db_cache['local'] = processed_samples
             return processed_samples
             
         except Exception as e:
@@ -362,6 +394,11 @@ class DataExporter:
         Returns:
             List of processed data samples from Android DB
         """
+        # Return cached data if available
+        if self._db_cache['android'] is not None:
+            print(f"📦 Using cached Android database data ({len(self._db_cache['android'])} samples)")
+            return self._db_cache['android']
+        
         # Check if data source is Android-based
         if self.data_source is None:
             return []
@@ -460,6 +497,7 @@ class DataExporter:
                     'per_core_raw': json.loads(f"[{row['per_core_raw']}]") if row['per_core_raw'] else [],
                     'per_core_freq_khz': json.loads(f"[{row['per_core_freq_khz']}]") if row['per_core_freq_khz'] else [],
                     'cpu_temp_millideg': row['cpu_temp_millideg'],
+                    'cpu_power_uj': row.get('cpu_power_uj', 0),
                     'mem_total_kb': row['mem_total_kb'],
                     'mem_free_kb': row['mem_free_kb'],
                     'mem_available_kb': row['mem_available_kb'],
@@ -495,6 +533,8 @@ class DataExporter:
                 
                 prev_raw = raw_data
             
+            # Cache the result before returning
+            self._db_cache['android'] = processed_samples
             return processed_samples
             
         except Exception as e:
@@ -557,7 +597,8 @@ class DataExporter:
                         'high': 95.0,
                         'critical': 105.0
                     }]
-                } if raw_data['cpu_temp_millideg'] > 0 else {}
+                } if raw_data['cpu_temp_millideg'] > 0 else {},
+                'power_watts': 0.0  # First sample, no previous data for power calculation
             },
             'memory': {
                 'memory': {
@@ -637,6 +678,28 @@ class DataExporter:
         
         avg_freq = sum(per_core_freq) / len(per_core_freq) if per_core_freq else 0
         
+        # CPU power (Intel RAPL - calculate from energy delta)
+        cpu_power_uj = raw_data.get('cpu_power_uj', 0)
+        prev_cpu_power_uj = prev_raw.get('cpu_power_uj', cpu_power_uj)
+        timestamp_ms = raw_data.get('timestamp_ms', timestamp * 1000)
+        prev_timestamp_ms = prev_raw.get('timestamp_ms', timestamp_ms)
+        
+        cpu_power_watts = 0.0
+        if cpu_power_uj > 0:
+            # Calculate energy delta (handle counter wrap-around)
+            energy_delta_uj = cpu_power_uj - prev_cpu_power_uj
+            if energy_delta_uj < 0:
+                # Counter wrapped around (assume 32-bit counter)
+                energy_delta_uj += (1 << 32)
+            
+            # Calculate time delta in seconds
+            time_delta_ms = timestamp_ms - prev_timestamp_ms
+            time_delta_sec = time_delta_ms / 1000.0 if time_delta_ms > 0 else 1.0
+            
+            # Power (Watts) = Energy (J) / Time (s)
+            # Energy (J) = energy_uj / 1,000,000
+            cpu_power_watts = (energy_delta_uj / 1_000_000.0) / time_delta_sec
+        
         # Memory
         mem_total_gb = raw_data['mem_total_kb'] / 1024 / 1024
         mem_available_gb = raw_data['mem_available_kb'] / 1024 / 1024
@@ -648,9 +711,7 @@ class DataExporter:
         # Support both i915 (runtime) and Xe (idle_residency) drivers
         gpu_driver = raw_data.get('gpu_driver', 'i915')  # Default to i915 for backward compatibility
         gpu_runtime_ms = raw_data.get('gpu_runtime_ms', 0)
-        timestamp_ms = raw_data.get('timestamp_ms', 0)
         prev_gpu_runtime_ms = prev_raw.get('gpu_runtime_ms', gpu_runtime_ms)
-        prev_timestamp_ms = prev_raw.get('timestamp_ms', timestamp_ms)
         
         gpu_util = 0
         if all([gpu_runtime_ms, prev_gpu_runtime_ms, timestamp_ms, prev_timestamp_ms]):
@@ -702,7 +763,8 @@ class DataExporter:
                         'high': 100.0,
                         'critical': 105.0
                     }]
-                } if raw_data['cpu_temp_millideg'] > 0 else {}
+                } if raw_data['cpu_temp_millideg'] > 0 else {},
+                'power_watts': cpu_power_watts
             },
             'memory': {
                 'memory': {
@@ -920,7 +982,8 @@ class DataExporter:
                         'high': 100.0,
                         'critical': 105.0
                     }]
-                } if raw_data['cpu_temp_millideg'] > 0 else {}
+                } if raw_data['cpu_temp_millideg'] > 0 else {},
+                'power_watts': 0.0  # First sample, no previous data for power calculation
             },
             'memory': {
                 'memory': {
@@ -1014,6 +1077,28 @@ class DataExporter:
             per_core_freq.append(core_freq_mhz)
         
         avg_freq = sum(per_core_freq) / len(per_core_freq) if per_core_freq else 0
+        
+        # CPU power (Intel RAPL - calculate from energy delta)
+        cpu_power_uj = raw_data.get('cpu_power_uj', 0)
+        prev_cpu_power_uj = prev_raw.get('cpu_power_uj', cpu_power_uj)
+        timestamp_ms = raw_data.get('timestamp_ms', timestamp * 1000)
+        prev_timestamp_ms = prev_raw.get('timestamp_ms', timestamp_ms)
+        
+        cpu_power_watts = 0.0
+        if cpu_power_uj > 0:
+            # Calculate energy delta (handle counter wrap-around)
+            energy_delta_uj = cpu_power_uj - prev_cpu_power_uj
+            if energy_delta_uj < 0:
+                # Counter wrapped around (assume 32-bit counter)
+                energy_delta_uj += (1 << 32)
+            
+            # Calculate time delta in seconds
+            time_delta_ms = timestamp_ms - prev_timestamp_ms
+            time_delta_sec = time_delta_ms / 1000.0 if time_delta_ms > 0 else 1.0
+            
+            # Power (Watts) = Energy (J) / Time (s)
+            # Energy (J) = energy_uj / 1,000,000
+            cpu_power_watts = (energy_delta_uj / 1_000_000.0) / time_delta_sec
         
         # Calculate monitor script's own CPU usage
         monitor_cpu_pct = 0.0
@@ -1122,7 +1207,8 @@ class DataExporter:
                         'critical': 105.0
                     }]
                 } if raw_data['cpu_temp_millideg'] > 0 else {},
-                'monitor_cpu_usage': monitor_cpu_pct  # Monitor script's own CPU usage
+                'monitor_cpu_usage': monitor_cpu_pct,  # Monitor script's own CPU usage
+                'power_watts': cpu_power_watts
             },
             'memory': {
                 'memory': {
@@ -1346,16 +1432,14 @@ class DataExporter:
                 export_data = local_data
                 print(f"📊 Exporting {len(export_data)} samples from local database")
         
-        # Fallback to session_data only if no database available
+        # Fallback to session_data
         if export_data is None:
-            if self._is_remote_source():
-                raise ValueError("Remote data source has no database samples available for export")
             export_data = self.session_data
             if export_data:
                 print(f"📊 Exporting {len(export_data)} samples from session data (in-memory)")
         
         if not export_data:
-            raise ValueError("No data to export")
+            raise ValueError("No data to export - no database or session data available")
         
         # Extract all unique keys from all samples
         all_keys = set()
@@ -1418,16 +1502,14 @@ class DataExporter:
                 export_samples = local_data
                 print(f"📊 Exporting {len(export_samples)} samples from local database")
         
-        # Fallback to session_data only if no database available
+        # Fallback to session_data
         if export_samples is None:
-            if self._is_remote_source():
-                raise ValueError("Remote data source has no database samples available for export")
             export_samples = self.session_data
             if export_samples:
                 print(f"📊 Exporting {len(export_samples)} samples from session data (in-memory)")
         
         if not export_samples:
-            raise ValueError("No data to export")
+            raise ValueError("No data to export - no database or session data available")
         
         export_data = {
             'session_info': {
@@ -1492,16 +1574,14 @@ class DataExporter:
                 export_samples = local_data
                 print(f"📊 Exporting {len(export_samples)} samples from local database")
         
-        # Fallback to session_data only if no database available
+        # Fallback to session_data
         if export_samples is None:
-            if self._is_remote_source():
-                raise ValueError("Remote data source has no database samples available for export")
             export_samples = self.session_data
             if export_samples:
                 print(f"📊 Exporting {len(export_samples)} samples from session data (in-memory)")
         
         if not export_samples:
-            raise ValueError("No data to export")
+            raise ValueError("No data to export - no database or session data available")
         
         # Temporarily replace session_data for statistics calculation
         original_session_data = self.session_data
@@ -1665,6 +1745,9 @@ class DataExporter:
         max_cpu_cores = 0
         max_temp_sensors = 0
         
+        # CPU power consumption array
+        cpu_power = []
+        
         for idx, sample in enumerate(self.session_data):
             # Extract timestamp
             if 'timestamp' in sample:
@@ -1716,6 +1799,10 @@ class DataExporter:
                             cpu_temps.append([])
                     else:
                         cpu_temps.append([])
+                    
+                    # CPU power consumption (Intel RAPL)
+                    power_watts = cpu_data.get('power_watts')
+                    cpu_power.append(power_watts)
             
             # GPU data extraction
             if 'gpu' in sample:
@@ -1890,7 +1977,8 @@ class DataExporter:
                 'freq_per_core': cpu_freq_per_core,
                 'temps': cpu_temps,
                 'max_cores': max_cpu_cores,
-                'max_temp_sensors': max_temp_sensors
+                'max_temp_sensors': max_temp_sensors,
+                'power': cpu_power
             },
             'gpu': {
                 'usage': gpu_usage,

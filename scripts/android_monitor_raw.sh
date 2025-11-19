@@ -53,7 +53,8 @@ init_database() {
         "    per_core_softirq_pct TEXT," \
         "    interrupt_data TEXT," \
         "    monitor_cpu_utime INTEGER," \
-        "    monitor_cpu_stime INTEGER" \
+        "    monitor_cpu_stime INTEGER," \
+        "    cpu_power_uj BIGINT" \
         ");" \
         "CREATE INDEX IF NOT EXISTS idx_timestamp ON raw_samples(timestamp);" \
         | sqlite3 "$DB_PATH"
@@ -100,6 +101,16 @@ get_cpu_temp_raw() {
         cat /sys/class/thermal/thermal_zone0/temp
     elif [ -f /sys/class/hwmon/hwmon0/temp1_input ]; then
         cat /sys/class/hwmon/hwmon0/temp1_input
+    else
+        echo "0"
+    fi
+}
+
+# Get CPU power consumption (Intel RAPL on x86 Android)
+get_cpu_power_uj() {
+    # Try Intel RAPL energy counter
+    if [ -f /sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj ]; then
+        cat /sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj 2>/dev/null || echo "0"
     else
         echo "0"
     fi
@@ -445,13 +456,15 @@ main() {
     GPU_DRIVER=$(get_gpu_driver_type)
     
     while true; do
-        LOOP_START=$(date +%s)
+        # Use millisecond precision for accurate timing
+        LOOP_START_MS=$(date +%s%3N)
         
         # CPU data
         read cpu_user cpu_nice cpu_sys cpu_idle cpu_iowait cpu_irq cpu_softirq cpu_steal <<< $(get_cpu_raw)
         per_core_stats=$(get_per_core_raw)
         per_core_freq=$(get_per_core_freq)
         cpu_temp=$(get_cpu_temp_raw)
+        cpu_power_uj=$(get_cpu_power_uj)
         
         # Memory data  
         read mem_total mem_free mem_available <<< $(get_memory_raw)
@@ -495,7 +508,7 @@ main() {
         TIMESTAMP_MS=$(date +%s%3N)
         
         # Insert into SQLite database (with proper escaping for JSON arrays)
-        sqlite3 "$DB_PATH" "INSERT INTO raw_samples (timestamp, timestamp_ms, cpu_user, cpu_nice, cpu_sys, cpu_idle, cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz, cpu_temp_millideg, mem_total_kb, mem_free_kb, mem_available_kb, gpu_driver, gpu_freq_mhz, gpu_runtime_ms, gpu_memory_used_bytes, gpu_memory_total_bytes, npu_info, net_rx_bytes, net_tx_bytes, disk_read_sectors, disk_write_sectors, ctxt, load_avg_1m, load_avg_5m, load_avg_15m, procs_running, procs_blocked, per_core_irq_pct, per_core_softirq_pct, interrupt_data, monitor_cpu_utime, monitor_cpu_stime) VALUES ($TIMESTAMP, $TIMESTAMP_MS, $cpu_user, $cpu_nice, $cpu_sys, $cpu_idle, $cpu_iowait, $cpu_irq, $cpu_softirq, $cpu_steal, '$per_core_stats', '$per_core_freq', $cpu_temp, $mem_total, $mem_free, $mem_available, '$GPU_DRIVER', $gpu_freq, $gpu_runtime, $gpu_mem_used, $gpu_mem_total, 'none', $net_rx, $net_tx, $disk_read, $disk_write, $ctxt, $load_1m, $load_5m, $load_15m, $procs_running, $procs_blocked, '$per_core_irq_pct', '$per_core_softirq_pct', '$interrupt_data', $monitor_utime, $monitor_stime);"
+        sqlite3 "$DB_PATH" "INSERT INTO raw_samples (timestamp, timestamp_ms, cpu_user, cpu_nice, cpu_sys, cpu_idle, cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz, cpu_temp_millideg, mem_total_kb, mem_free_kb, mem_available_kb, gpu_driver, gpu_freq_mhz, gpu_runtime_ms, gpu_memory_used_bytes, gpu_memory_total_bytes, npu_info, net_rx_bytes, net_tx_bytes, disk_read_sectors, disk_write_sectors, ctxt, load_avg_1m, load_avg_5m, load_avg_15m, procs_running, procs_blocked, per_core_irq_pct, per_core_softirq_pct, interrupt_data, monitor_cpu_utime, monitor_cpu_stime, cpu_power_uj) VALUES ($TIMESTAMP, $TIMESTAMP_MS, $cpu_user, $cpu_nice, $cpu_sys, $cpu_idle, $cpu_iowait, $cpu_irq, $cpu_softirq, $cpu_steal, '$per_core_stats', '$per_core_freq', $cpu_temp, $mem_total, $mem_free, $mem_available, '$GPU_DRIVER', $gpu_freq, $gpu_runtime, $gpu_mem_used, $gpu_mem_total, 'none', $net_rx, $net_tx, $disk_read, $disk_write, $ctxt, $load_1m, $load_5m, $load_15m, $procs_running, $procs_blocked, '$per_core_irq_pct', '$per_core_softirq_pct', '$interrupt_data', $monitor_utime, $monitor_stime, $cpu_power_uj);"
         
         # Output JSON - single line with printf (no line wrapping issues)
         # Send RAW gpu_runtime_ms AND timestamp_ms for accurate host-side calculation
@@ -504,10 +517,10 @@ main() {
         # disk_read_sectors/disk_write_sectors: CUMULATIVE values (host calculates delta)
         # net_rx_bytes/net_tx_bytes: CUMULATIVE values (host calculates delta)
         # Tier 1 fields included conditionally (null values if disabled)
-        printf '{"timestamp_ms":%s,"cpu_raw":{"user":%d,"nice":%d,"sys":%d,"idle":%d,"iowait":%d,"irq":%d,"softirq":%d,"steal":%d},"per_core_raw":[%s],"per_core_freq_khz":[%s],"cpu_temp_millideg":%d,"mem_total_kb":%d,"mem_free_kb":%d,"mem_available_kb":%d,"gpu_driver":"%s","gpu_freq_mhz":%d,"gpu_runtime_ms":%d,"gpu_memory_used_bytes":%d,"gpu_memory_total_bytes":%d,"npu_info":"%s","net_rx_bytes":%d,"net_tx_bytes":%d,"disk_read_sectors":%d,"disk_write_sectors":%d,"ctxt":%s,"load_avg_1m":%s,"load_avg_5m":%s,"load_avg_15m":%s,"procs_running":%s,"procs_blocked":%s,"per_core_irq_pct":%s,"per_core_softirq_pct":%s,"interrupt_data":%s,"monitor_cpu_utime":%d,"monitor_cpu_stime":%d}\n' \
+        printf '{"timestamp_ms":%s,"cpu_raw":{"user":%d,"nice":%d,"sys":%d,"idle":%d,"iowait":%d,"irq":%d,"softirq":%d,"steal":%d},"per_core_raw":[%s],"per_core_freq_khz":[%s],"cpu_temp_millideg":%d,"cpu_power_uj":%d,"mem_total_kb":%d,"mem_free_kb":%d,"mem_available_kb":%d,"gpu_driver":"%s","gpu_freq_mhz":%d,"gpu_runtime_ms":%d,"gpu_memory_used_bytes":%d,"gpu_memory_total_bytes":%d,"npu_info":"%s","net_rx_bytes":%d,"net_tx_bytes":%d,"disk_read_sectors":%d,"disk_write_sectors":%d,"ctxt":%s,"load_avg_1m":%s,"load_avg_5m":%s,"load_avg_15m":%s,"procs_running":%s,"procs_blocked":%s,"per_core_irq_pct":%s,"per_core_softirq_pct":%s,"interrupt_data":%s,"monitor_cpu_utime":%d,"monitor_cpu_stime":%d}\n' \
             "$TIMESTAMP_MS" \
             "$cpu_user" "$cpu_nice" "$cpu_sys" "$cpu_idle" "$cpu_iowait" "$cpu_irq" "$cpu_softirq" "$cpu_steal" \
-            "$per_core_stats" "$per_core_freq" "$cpu_temp" \
+            "$per_core_stats" "$per_core_freq" "$cpu_temp" "$cpu_power_uj" \
             "$mem_total" "$mem_free" "$mem_available" \
             "$GPU_DRIVER" \
             "$gpu_freq" "$gpu_runtime" "$gpu_mem_used" "$gpu_mem_total" \
@@ -519,12 +532,15 @@ main() {
             "$interrupt_data" \
             "$monitor_utime" "$monitor_stime"
         
-        # Sleep until next interval
-        LOOP_END=$(date +%s)
-        ELAPSED=$((LOOP_END - LOOP_START))
-        SLEEP_TIME=$((INTERVAL - ELAPSED))
-        if [ "$SLEEP_TIME" -gt 0 ]; then
-            sleep "$SLEEP_TIME"
+        # Sleep until next interval (millisecond precision)
+        LOOP_END_MS=$(date +%s%3N)
+        ELAPSED_MS=$((LOOP_END_MS - LOOP_START_MS))
+        SLEEP_MS=$((INTERVAL * 1000 - ELAPSED_MS))
+        
+        if [ "$SLEEP_MS" -gt 0 ]; then
+            # Convert to seconds with decimal (e.g., 0.750 for 750ms)
+            SLEEP_SEC=$(awk "BEGIN {printf \"%.3f\", $SLEEP_MS/1000}")
+            sleep "$SLEEP_SEC"
         fi
     done
 }

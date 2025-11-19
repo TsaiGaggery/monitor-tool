@@ -192,6 +192,11 @@
             <canvas id="cpuTempChart"></canvas>
         </div>
         
+        <div class="chart-container" id="cpuPowerContainer">
+            <div class="chart-title">⚡ CPU Power Consumption (W)</div>
+            <canvas id="cpuPowerChart"></canvas>
+        </div>
+        
         <!-- Tier 1 System Metrics Section -->
         <h3 id="tier1SectionHeader" style="color: #14ffec; margin-top: 30px; display: none;">📊 Advanced System Metrics (Tier 1)</h3>
         
@@ -528,6 +533,38 @@
                 }
             }
         });
+        
+        // CPU Power Chart
+        if (chartData.cpu.power && chartData.cpu.power.some(p => p !== null && p > 0)) {
+            document.getElementById('cpuPowerContainer').style.display = 'block';
+            new Chart(document.getElementById('cpuPowerChart'), {
+                type: 'line',
+                data: {
+                    labels: chartData.timestamps,
+                    datasets: [{
+                        label: 'CPU Power (W)',
+                        data: chartData.cpu.power,
+                        borderColor: '#ffd93d',
+                        backgroundColor: 'rgba(255, 217, 61, 0.1)',
+                        borderWidth: 2,
+                        tension: 0.3,
+                        fill: true
+                    }]
+                },
+                options: {
+                    ...commonOptions,
+                    scales: {
+                        ...commonOptions.scales,
+                        y: {
+                            ...commonOptions.scales.y,
+                            title: { display: true, text: 'Power (W)', color: '#e0e0e0' }
+                        }
+                    }
+                }
+            });
+        } else {
+            document.getElementById('cpuPowerContainer').style.display = 'none';
+        }
         
         // ============================================
         // Tier 1 System Metrics Charts
