@@ -38,9 +38,31 @@ class DataLogger:
     
     def init_database(self):
         """Initialize database schema - UNIFIED schema matching SSH/Android format."""
+        # Check if database exists and validate schema
+        db_exists = os.path.exists(self.db_path)
+        
         # Allow connection to be used from multiple threads
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         cursor = self.conn.cursor()
+        
+        # Validate schema if database already exists
+        if db_exists:
+            try:
+                # Check for required columns that are in the new schema
+                cursor.execute("PRAGMA table_info(monitoring_data)")
+                columns = {row[1] for row in cursor.fetchall()}
+                required_columns = {'timestamp_ms', 'monitor_cpu_utime', 'monitor_cpu_stime'}
+                
+                # If any required column is missing, the schema is outdated
+                if not required_columns.issubset(columns):
+                    print(f"⚠️  Database schema is outdated. Recreating database...")
+                    self.conn.close()
+                    os.remove(self.db_path)
+                    self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+                    cursor = self.conn.cursor()
+            except sqlite3.OperationalError:
+                # Table doesn't exist yet, no need to validate
+                pass
         
         # Create monitoring data table - UNIFIED SCHEMA (matches linux_monitor_remote.sh)
         # Stores RAW data for consistent processing across all modes

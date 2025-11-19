@@ -276,13 +276,11 @@ class MainWindow(QMainWindow):
         self.cpu_freq_label = QLabel("Frequency: -")
         self.cpu_temp_label = QLabel("Temperature: -")
         self.cpu_governor_label = QLabel("Governor: -")
-        self.cpu_monitor_usage_label = QLabel("Monitor CPU: -")
         
         info_layout.addWidget(self.cpu_cores_label, 0, 0)
         info_layout.addWidget(self.cpu_freq_label, 0, 1)
         info_layout.addWidget(self.cpu_temp_label, 1, 0)
         info_layout.addWidget(self.cpu_governor_label, 1, 1)
-        info_layout.addWidget(self.cpu_monitor_usage_label, 2, 0)
         
         info_group.setLayout(info_layout)
         layout.addWidget(info_group)
@@ -569,13 +567,6 @@ class MainWindow(QMainWindow):
         else:
             self.cpu_governor_label.setText(f"Governor: N/A (Android)")
         
-        # Monitor CPU usage
-        monitor_cpu = cpu_info.get('monitor_cpu_usage', 0)
-        if monitor_cpu > 0:
-            self.cpu_monitor_usage_label.setText(f"Monitor CPU: {monitor_cpu:.2f}%")
-        else:
-            self.cpu_monitor_usage_label.setText("Monitor CPU: -")
-        
         # Memory data
         memory_info = self.data_source.get_memory_info()
         mem = memory_info['memory']
@@ -784,12 +775,17 @@ class MainWindow(QMainWindow):
             else:
                 return f"{kb:.0f}K"
         
+        # Monitor CPU usage
+        monitor_cpu = cpu_info.get('monitor_cpu_usage', 0)
+        monitor_cpu_str = f"Monitor: {monitor_cpu:.1f}%" if monitor_cpu > 0 else "Monitor: -"
+        
         status_msg = (
             f"Last update: {time.strftime('%H:%M:%S')} | "
             f"CPU: {cpu_usage:.1f}% | "
             f"Mem: {mem['percent']:.1f}% | "
             f"Net: ↑{format_speed_short(upload_speed_bytes)}/↓{format_speed_short(download_speed_bytes)} | "
-            f"Disk: R{read_speed_mb:.1f}/W{write_speed_mb:.1f} MB/s"
+            f"Disk: R{read_speed_mb:.1f}/W{write_speed_mb:.1f} MB/s | "
+            f"{monitor_cpu_str}"
         )
         
         # Add GPU info if available

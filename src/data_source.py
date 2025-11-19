@@ -386,13 +386,17 @@ class AndroidDataSource(MonitorDataSource):
         raw_data = self.adb_monitor.get_latest_data()
         if raw_data:
             cpu_raw = raw_data.get('cpu_raw', {})
-            monitor_cpu_usage = self._calculate_monitor_cpu_usage(raw_data, cpu_raw)
+            cpu_count = cpu_info.get('cpu_count', 1)
+            monitor_cpu_usage = self._calculate_monitor_cpu_usage(raw_data, cpu_raw, cpu_count)
             cpu_info['monitor_cpu_usage'] = monitor_cpu_usage
         
         return cpu_info
     
-    def _calculate_monitor_cpu_usage(self, raw_data: Dict, cpu_raw: Dict) -> float:
-        """Calculate monitor script CPU usage from raw data (same as RemoteLinuxDataSource)."""
+    def _calculate_monitor_cpu_usage(self, raw_data: Dict, cpu_raw: Dict, cpu_count: int) -> float:
+        """Calculate monitor script CPU usage from raw data.
+        
+        Returns per-core CPU percentage (normalized by cpu_count) to match local monitoring behavior.
+        """
         monitor_utime = raw_data.get('monitor_cpu_utime', 0)
         monitor_stime = raw_data.get('monitor_cpu_stime', 0)
         
@@ -423,9 +427,11 @@ class AndroidDataSource(MonitorDataSource):
         self._prev_monitor_stime = monitor_stime
         self._prev_cpu_total = curr_total
         
-        # Calculate percentage
-        if delta_total > 0:
-            monitor_cpu_pct = (delta_monitor * 100.0) / delta_total
+        # Calculate percentage (multiply by cpu_count to get per-core percentage)
+        # delta_total is total ticks across ALL cores, so we normalize to single-core equivalent
+        if delta_total > 0 and cpu_count > 0:
+            # This gives percentage as if running on a single core (matches psutil behavior)
+            monitor_cpu_pct = (delta_monitor * 100.0 * cpu_count) / delta_total
             return max(0.0, min(100.0, monitor_cpu_pct))
         
         return 0.0
@@ -670,10 +676,11 @@ class RemoteLinuxDataSource(MonitorDataSource):
             ]
         
         # Calculate monitor CPU usage
-        monitor_cpu_usage = self._calculate_monitor_cpu_usage(raw_data, cpu_raw)
+        cpu_count = len(per_core_raw)
+        monitor_cpu_usage = self._calculate_monitor_cpu_usage(raw_data, cpu_raw, cpu_count)
         
         return {
-            'cpu_count': len(per_core_raw),
+            'cpu_count': cpu_count,
             'physical_count': len(per_core_raw),  # Simplified
             'usage': {
                 'total': cpu_usage['total'],
@@ -753,15 +760,18 @@ class RemoteLinuxDataSource(MonitorDataSource):
         
         return result
     
-    def _calculate_monitor_cpu_usage(self, raw_data: Dict, cpu_raw: Dict) -> float:
+    def _calculate_monitor_cpu_usage(self, raw_data: Dict, cpu_raw: Dict, cpu_count: int) -> float:
         """Calculate monitor script CPU usage from raw data.
+        
+        Returns per-core CPU percentage (normalized by cpu_count) to match local monitoring behavior.
         
         Args:
             raw_data: Raw monitoring data containing monitor_cpu_utime and monitor_cpu_stime
             cpu_raw: Current CPU raw stats for total ticks calculation
+            cpu_count: Number of CPU cores (for normalization)
             
         Returns:
-            Monitor CPU usage percentage (0-100)
+            Monitor CPU usage percentage (0-100, per-core equivalent)
         """
         monitor_utime = raw_data.get('monitor_cpu_utime', 0)
         monitor_stime = raw_data.get('monitor_cpu_stime', 0)
@@ -793,9 +803,11 @@ class RemoteLinuxDataSource(MonitorDataSource):
         self._prev_monitor_stime = monitor_stime
         self._prev_cpu_total = curr_total
         
-        # Calculate percentage
-        if delta_total > 0:
-            monitor_cpu_pct = (delta_monitor * 100.0) / delta_total
+        # Calculate percentage (multiply by cpu_count to get per-core percentage)
+        # delta_total is total ticks across ALL cores, so we normalize to single-core equivalent
+        if delta_total > 0 and cpu_count > 0:
+            # This gives percentage as if running on a single core (matches psutil behavior)
+            monitor_cpu_pct = (delta_monitor * 100.0 * cpu_count) / delta_total
             return max(0.0, min(100.0, monitor_cpu_pct))
         
         return 0.0
