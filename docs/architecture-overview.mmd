@@ -1,0 +1,88 @@
+graph TB
+    subgraph "User Interfaces"
+        GUI[PyQt5 GUI<br/>main_window.py]
+        CLI[CLI Monitor<br/>cli_monitor.py]
+    end
+    
+    subgraph "Data Source Layer (Proxy Pattern)"
+        DS[MonitorDataSource<br/>Abstract Base]
+        LOCAL[LocalDataSource<br/>Direct System Access]
+        SSH[RemoteLinuxDataSource<br/>SSH Connection]
+        ADB[AndroidDataSource<br/>ADB Connection]
+    end
+    
+    subgraph "Hardware Monitors"
+        CPU[CPUMonitor<br/>psutil + /proc]
+        GPU[GPUMonitor<br/>NVIDIA/AMD/Intel]
+        NPU[NPUMonitor<br/>Intel/Rockchip]
+        MEM[MemoryMonitor<br/>psutil]
+        NET[NetworkMonitor<br/>psutil]
+        DISK[DiskMonitor<br/>psutil]
+    end
+    
+    subgraph "Controllers"
+        FREQ[FrequencyController<br/>Base Class]
+        SSHFREQ[SSHFrequencyController<br/>Remote Control]
+        ADBFREQ[ADBFrequencyController<br/>Android Control]
+    end
+    
+    subgraph "Client-Side Storage & Export (Local Mode Only)"
+        LOGGER[DataLogger<br/>SQLite Storage]
+        LOCALDB[(Local SQLite DB<br/>~/.monitor-tool/monitor_data.db)]
+        EXPORTER[DataExporter<br/>CSV/JSON/HTML]
+    end
+    
+    subgraph "Remote Linux System (SSH Mode)"
+        SSHSCRIPT[linux_monitor_remote.sh<br/>Bash Script]
+        SSHMONITOR[SSHMonitorRaw<br/>Streaming Parser]
+        SSHDB[(Remote SQLite DB<br/>/tmp/monitor_tool_user.db)]
+    end
+    
+    subgraph "Android Device (ADB Mode)"
+        ADBSCRIPT[android_monitor_raw.sh<br/>Shell Script]
+        ADBMONITOR[ADBMonitorRaw<br/>Streaming Parser]
+        ADBDB[(Device SQLite DB<br/>/data/local/tmp/monitor.db)]
+    end
+    
+    GUI --> DS
+    CLI --> DS
+    
+    DS --> LOCAL
+    DS --> SSH
+    DS --> ADB
+    
+    LOCAL --> CPU
+    LOCAL --> GPU
+    LOCAL --> NPU
+    LOCAL --> MEM
+    LOCAL --> NET
+    LOCAL --> DISK
+    
+    SSH --> SSHMONITOR
+    SSHMONITOR --> SSHSCRIPT
+    SSHSCRIPT --> SSHDB
+    SSHMONITOR -.->|JSON Stream| SSH
+    
+    ADB --> ADBMONITOR
+    ADBMONITOR --> ADBSCRIPT
+    ADBSCRIPT --> ADBDB
+    ADBMONITOR -.->|JSON Stream| ADB
+    
+    GUI --> FREQ
+    CLI --> FREQ
+    FREQ --> SSHFREQ
+    FREQ --> ADBFREQ
+    
+    LOCAL --> LOGGER
+    LOGGER --> LOCALDB
+    
+    GUI --> EXPORTER
+    CLI --> EXPORTER
+    EXPORTER -.->|Local Mode| LOCALDB
+    EXPORTER -.->|SSH Mode| SSHDB
+    EXPORTER -.->|Android Mode| ADBDB
+    EXPORTER --> |HTML Report|TEMPLATE[report.html]
+    
+    style DS fill:#4CAF50
+    style LOGGER fill:#2196F3
+    style EXPORTER fill:#FF9800

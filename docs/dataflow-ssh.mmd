@@ -1,0 +1,37 @@
+sequenceDiagram
+    participant GUI as GUI/CLI
+    participant SSH as RemoteLinuxDataSource
+    participant SSHMon as SSHMonitorRaw
+    participant Script as linux_monitor_remote.sh
+    participant Remote as Remote Linux Host
+    participant DB as Remote SQLite DB
+    
+    GUI->>SSH: connect()
+    SSH->>SSHMon: __init__(host, user, password)
+    SSHMon->>Remote: ssh user@host
+    Remote-->>SSHMon: Connection OK
+    
+    SSHMon->>Script: Deploy & Execute
+    Script->>Remote: Read /proc/stat, /proc/meminfo, etc.
+    Remote-->>Script: Raw system data
+    Script->>DB: INSERT INTO monitoring_data
+    Script-->>SSHMon: JSON stream (stdout)
+    
+    loop Every 1 second
+        SSHMon->>SSHMon: Parse JSON line
+        SSHMon->>SSHMon: Buffer in queue (100 samples)
+    end
+    
+    GUI->>SSH: get_cpu_info()
+    SSH->>SSHMon: get_latest_data()
+    SSHMon-->>SSH: Buffered raw data
+    SSH->>SSH: Process raw_data to GUI format
+    SSH-->>GUI: {cpu, memory, gpu, ...}
+    
+    Note over GUI: Display Real-time Data
+    
+    GUI->>SSH: Export HTML
+    SSH->>Remote: Pull /tmp/monitor_tool_user.db
+    SSH->>SSH: Query remote DB via SSH
+    SSH-->>GUI: Sample data list
+    GUI->>GUI: Generate HTML Report

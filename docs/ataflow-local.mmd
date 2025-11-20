@@ -1,0 +1,25 @@
+sequenceDiagram
+    participant GUI as PyQt5 GUI
+    participant DS as LocalDataSource
+    participant CPU as CPUMonitor
+    participant GPU as GPUMonitor
+    participant Logger as DataLogger
+    participant DB as SQLite DB
+    
+    GUI->>DS: get_cpu_info()
+    DS->>CPU: get_all_info()
+    CPU->>CPU: Read /proc/stat, /proc/cpuinfo
+    CPU-->>DS: {usage, freq, temp, ...}
+    DS-->>GUI: CPU Data
+    
+    GUI->>DS: get_gpu_info()
+    DS->>GPU: get_all_info()
+    GPU->>GPU: Query pynvml/rocm-smi/sysfs
+    GPU-->>DS: {util, freq, temp, power, ...}
+    DS-->>GUI: GPU Data
+    
+    GUI->>Logger: log_sample(snapshot)
+    Logger->>DB: INSERT INTO monitoring_data
+    DB-->>Logger: OK
+    
+    Note over GUI: Update Charts<br/>Display Metrics

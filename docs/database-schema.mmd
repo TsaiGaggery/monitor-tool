@@ -1,0 +1,64 @@
+erDiagram
+    monitoring_data {
+        INTEGER id PK
+        INTEGER timestamp
+        REAL cpu_usage
+        REAL cpu_freq_avg
+        REAL cpu_temp
+        REAL cpu_power_watts
+        TEXT cpu_usage_per_core
+        TEXT cpu_freq_per_core
+        REAL memory_total
+        REAL memory_used
+        REAL memory_percent
+        REAL memory_available
+        REAL swap_total
+        REAL swap_used
+        REAL swap_percent
+        REAL gpu_usage
+        REAL gpu_freq
+        REAL gpu_temp
+        REAL gpu_power
+        REAL gpu_memory_used
+        REAL gpu_memory_total
+        REAL npu_usage
+        REAL npu_freq
+        REAL network_upload_speed
+        REAL network_download_speed
+        REAL disk_read_speed
+        REAL disk_write_speed
+        INTEGER ctxt
+        REAL load_avg_1m
+        REAL load_avg_5m
+        REAL load_avg_15m
+        INTEGER procs_running
+        INTEGER procs_blocked
+        TEXT per_core_irq_pct
+        TEXT per_core_softirq_pct
+        TEXT interrupt_data
+    }
+    
+    raw_samples {
+        INTEGER id PK
+        INTEGER timestamp_ms
+        TEXT cpu_raw
+        TEXT per_core_raw
+        TEXT cpu_freq_raw
+        INTEGER cpu_power_uj
+        TEXT mem_raw
+        INTEGER net_rx_bytes
+        INTEGER net_tx_bytes
+        INTEGER disk_read_sectors
+        INTEGER disk_write_sectors
+        INTEGER ctxt
+        REAL load_avg_1m
+        REAL load_avg_5m
+        REAL load_avg_15m
+        INTEGER procs_running
+        INTEGER procs_blocked
+        TEXT per_core_irq_pct
+        TEXT per_core_softirq_pct
+        TEXT interrupt_data
+    }
+    
+    monitoring_data ||--o{ raw_samples : "processed from"

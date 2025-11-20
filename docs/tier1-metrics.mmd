@@ -1,0 +1,25 @@
+flowchart TD
+    Start[enable_tier1 = True] --> CheckMode{Monitoring Mode?}
+    
+    CheckMode -->|Local| LocalTier1[Read /proc Files<br/>/proc/stat → ctxt<br/>/proc/loadavg → load_avg<br/>/proc/interrupts → IRQ data]
+    CheckMode -->|SSH| SSHTier1[Remote Script Reads<br/>Same /proc files<br/>via linux_monitor_remote.sh]
+    CheckMode -->|Android| ADBTier1[Android Script Reads<br/>/proc/stat → ctxt<br/>/proc/loadavg → load_avg<br/>via android_monitor_raw.sh]
+    
+    LocalTier1 --> CalcRates[Calculate Rates<br/>- Context switches/sec<br/>- Interrupt rates/sec<br/>- Per-core IRQ%]
+    SSHTier1 --> CalcRates
+    ADBTier1 --> CalcRates
+    
+    CalcRates --> Store[Store in DB<br/>monitoring_data table]
+    
+    Store --> Export{Export?}
+    
+    Export -->|CSV| CSVT1[Add tier1_* columns<br/>context_switches, load_avg_1m,<br/>interrupts_top5, ...]
+    Export -->|JSON| JSONT1[Add tier1 object<br/>context_switches, load_avg,<br/>interrupts: ...]
+    Export -->|HTML| HTMLT1[Render Tier 1 Charts<br/>- Context Switches Chart<br/>- Load Average Chart<br/>- Process Counts Chart<br/>- Per-Core IRQ Heatmap<br/>- Interrupt Distribution Chart]
+    
+    CSVT1 --> Done([Export Complete])
+    JSONT1 --> Done
+    HTMLT1 --> Done
+    
+    style CalcRates fill:#4CAF50
+    style HTMLT1 fill:#2196F3

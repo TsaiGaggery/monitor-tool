@@ -1,0 +1,86 @@
+graph LR
+    subgraph "UI Layer"
+        MAIN[main.py]
+        GUI[ui/main_window.py]
+        CLI[cli_monitor.py]
+    end
+    
+    subgraph "Data Source Layer"
+        DS[data_source.py]
+    end
+    
+    subgraph "Monitors"
+        CPU[monitors/cpu_monitor.py]
+        GPU[monitors/gpu_monitor.py]
+        NPU[monitors/npu_monitor.py]
+        MEM[monitors/memory_monitor.py]
+        NET[monitors/network_monitor.py]
+        DISK[monitors/disk_monitor.py]
+        SSHMON[monitors/ssh_monitor_raw.py]
+        ADBMON[monitors/adb_monitor_raw.py]
+    end
+    
+    subgraph "Controllers"
+        FREQ[controllers/frequency_controller.py]
+        SSHFREQ[controllers/ssh_freq_controller.py]
+        ADBFREQ[controllers/adb_freq_controller.py]
+    end
+    
+    subgraph "Storage"
+        LOGGER[storage/data_logger.py]
+        EXPORTER[storage/data_exporter.py]
+    end
+    
+    subgraph "Utils (Shared)"
+        CPUUTIL[utils/cpu_utils.py]
+        IRQUTIL[utils/interrupt_utils.py]
+    end
+    
+    subgraph "External"
+        PSUTIL[psutil]
+        PYNVML[pynvml]
+        PYQT5[PyQt5]
+        SQLITE[sqlite3]
+    end
+    
+    MAIN --> GUI
+    MAIN --> CLI
+    GUI --> DS
+    CLI --> DS
+    
+    DS --> CPU
+    DS --> GPU
+    DS --> NPU
+    DS --> MEM
+    DS --> NET
+    DS --> DISK
+    DS --> SSHMON
+    DS --> ADBMON
+    
+    CPU --> PSUTIL
+    GPU --> PYNVML
+    MEM --> PSUTIL
+    NET --> PSUTIL
+    DISK --> PSUTIL
+    
+    SSHMON --> CPUUTIL
+    SSHMON --> IRQUTIL
+    ADBMON --> CPUUTIL
+    EXPORTER --> CPUUTIL
+    EXPORTER --> IRQUTIL
+    DS --> IRQUTIL
+    
+    GUI --> FREQ
+    CLI --> FREQ
+    FREQ --> SSHFREQ
+    FREQ --> ADBFREQ
+    
+    GUI --> LOGGER
+    CLI --> LOGGER
+    LOGGER --> SQLITE
+    
+    GUI --> EXPORTER
+    CLI --> EXPORTER
+    EXPORTER --> SQLITE
+    
+    GUI --> PYQT5

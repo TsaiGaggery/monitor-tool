@@ -1,0 +1,40 @@
+flowchart TD
+    Start([User Clicks Export]) --> CheckSource{Data Source?}
+    
+    CheckSource -->|Local| LocalDB[Query Local SQLite DB<br/>~/.monitor-tool/monitor_data.db]
+    CheckSource -->|SSH| SSHDB[SSH Query Remote DB<br/>/tmp/monitor_tool_user.db]
+    CheckSource -->|Android| ADBDB[Pull Android DB<br/>/data/local/tmp/monitor.db]
+    CheckSource -->|Session| SessionMem[Use In-Memory<br/>session_data]
+    
+    LocalDB --> RawSamples[Raw Samples List]
+    SSHDB --> RawSamples
+    ADBDB --> RawSamples
+    SessionMem --> RawSamples
+    
+    RawSamples --> ProcessLoop{For Each Sample}
+    
+    ProcessLoop --> CalcDeltas[Calculate Deltas<br/>CPU: usage from ticks<br/>Network: bytes/sec<br/>Disk: MB/sec]
+    
+    CalcDeltas --> BuildSample[Build Sample Dict<br/>timestamp, cpu, memory,<br/>gpu, network, disk, tier1]
+    
+    BuildSample --> AddToList[Add to export_samples list]
+    
+    AddToList --> MoreSamples{More Samples?}
+    MoreSamples -->|Yes| ProcessLoop
+    MoreSamples -->|No| CalcStats[Calculate Statistics<br/>min, max, avg per metric]
+    
+    CalcStats --> GenFormat{Export Format?}
+    
+    GenFormat -->|CSV| GenCSV[Generate CSV File<br/>Flat structure with headers]
+    GenFormat -->|JSON| GenJSON[Generate JSON File<br/>Array of sample objects]
+    GenFormat -->|HTML| GenHTML[Generate HTML Report<br/>Jinja2 template + Chart.js]
+    
+    GenCSV --> SaveFile[Save to reports/YYYY-MM-DD/]
+    GenJSON --> SaveFile
+    GenHTML --> SaveFile
+    
+    SaveFile --> Complete([Export Complete<br/>Show file path])
+    
+    style CheckSource fill:#4CAF50
+    style CalcDeltas fill:#FF9800
+    style GenHTML fill:#2196F3

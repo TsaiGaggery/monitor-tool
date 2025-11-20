@@ -1,0 +1,37 @@
+sequenceDiagram
+    participant GUI as GUI/CLI
+    participant ADB as AndroidDataSource
+    participant ADBMon as ADBMonitorRaw
+    participant Script as android_monitor_raw.sh
+    participant Device as Android Device
+    participant DB as /data/local/tmp/monitor.db
+    
+    GUI->>ADB: connect(device_ip)
+    ADB->>Device: adb connect 172.25.65.70:5555
+    Device-->>ADB: Connected
+    
+    ADB->>ADBMon: start_streaming()
+    ADBMon->>Device: adb push android_monitor_raw.sh
+    ADBMon->>Device: adb shell "sh /data/local/tmp/android_monitor_raw.sh 1"
+    
+    Script->>Device: Read /proc/stat, /proc/meminfo
+    Script->>DB: INSERT INTO raw_samples
+    Script-->>ADBMon: JSON line (stdout)
+    
+    loop Every 1 second
+        ADBMon->>ADBMon: Parse JSON line
+        ADBMon->>ADBMon: Calculate deltas (CPU, power, network)
+    end
+    
+    GUI->>ADB: get_cpu_info()
+    ADB->>ADBMon: get_cpu_info()
+    ADBMon-->>ADB: Processed data
+    ADB-->>GUI: {usage, freq, temp, power}
+    
+    Note over GUI: Display Real-time Data
+    
+    GUI->>ADB: Export HTML
+    ADB->>Device: adb pull /data/local/tmp/monitor.db
+    ADB->>ADB: Query local copy of DB
+    ADB-->>GUI: Sample data list
+    GUI->>GUI: Generate HTML Report

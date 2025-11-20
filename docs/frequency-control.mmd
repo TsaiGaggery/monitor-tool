@@ -1,0 +1,59 @@
+classDiagram
+    class FrequencyController {
+        <<abstract>>
+        +is_available: bool
+        +has_sudo: bool
+        +get_available_governors() List~str~
+        +get_current_governor() str
+        +set_governor(governor: str) bool
+        +get_frequency_range() Tuple
+        +set_frequency_range(min, max) bool
+        +get_gpu_frequency_range() Tuple
+        +set_gpu_frequency(freq: int) bool
+    }
+    
+    class LocalFrequencyController {
+        +_check_cpufreq_support() bool
+        +_check_sudo_permissions() bool
+        +_write_sysfs(path, value) bool
+        +get_current_frequencies() List
+        +apply_preset(preset_name: str) bool
+    }
+    
+    class SSHFrequencyController {
+        -host: str
+        -user: str
+        -password: str
+        -key_path: str
+        +_ssh_command(cmd: str) Tuple
+        +_write_remote_sysfs(path, value) bool
+        +setup_passwordless_sudo() bool
+        +check_remote_cpufreq() bool
+    }
+    
+    class ADBFrequencyController {
+        -device_id: str
+        +_adb_command(cmd: str) Tuple
+        +_check_root_access() bool
+        +_write_android_sysfs(path, value) bool
+        +get_available_frequencies() List
+    }
+    
+    FrequencyController <|-- LocalFrequencyController
+    FrequencyController <|-- SSHFrequencyController
+    FrequencyController <|-- ADBFrequencyController
+    
+    class MainWindow {
+        -freq_controller: FrequencyController
+        +on_governor_changed()
+        +on_frequency_changed()
+    }
+    
+    class CLIMonitor {
+        -freq_controller: FrequencyController
+        +handle_cpu_control()
+        +handle_gpu_control()
+    }
+    
+    MainWindow --> FrequencyController
+    CLIMonitor --> FrequencyController
