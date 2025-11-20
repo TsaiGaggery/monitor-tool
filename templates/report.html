@@ -121,6 +121,10 @@
                 <div class="summary-value">{{ source_name }}</div>
             </div>
             <div class="summary-item">
+                <div class="summary-label">Retrieval Method</div>
+                <div class="summary-value">{{ data_source_method }}</div>
+            </div>
+            <div class="summary-item">
                 <div class="summary-label">Start Time</div>
                 <div class="summary-value">{{ start_time }}</div>
             </div>
@@ -137,7 +141,8 @@
         <script>
             // Hide GPU temp/power containers if no data
             window.addEventListener('DOMContentLoaded', () => {
-                const chartData = JSON.parse('{{ chart_data_json }}');
+                // chartData is defined in the main script block below
+                // const chartData = JSON.parse('{{ chart_data_json }}');
                 
                 // Hide GPU temperature chart if all zeros
                 if (!chartData.gpu.temp || chartData.gpu.temp.every(t => t === 0)) {
@@ -310,7 +315,7 @@
     </div>
     
     <script>
-        const chartData = {{ chart_data_json }};
+        const chartData = JSON.parse('{{ chart_data_json }}');
         
         // Common chart configuration
         const commonOptions = {
@@ -899,6 +904,46 @@
             // Find max value for color scaling
             const maxValue = Math.max(...heatmapData.map(d => d.v), 1);
             
+            // Helper function for logarithmic color scaling
+            function getHeatmapColor(value, maxVal) {
+                if (!value || value === 0) return 'rgba(200, 200, 200, 0.2)'; // Grey for 0
+                
+                // Logarithmic scale
+                // We map log(1)..log(maxVal) to 0..1
+                const minLog = 0; // log(1)
+                const maxLog = Math.log(maxVal || 1);
+                const valLog = Math.log(value || 1);
+                
+                let ratio = 0;
+                if (maxLog > minLog) {
+                    ratio = (valLog - minLog) / (maxLog - minLog);
+                }
+                
+                // Gradient: Blue (0) -> Green (0.5) -> Red (1.0)
+                let r, g, b;
+                if (ratio < 0.5) {
+                    // Blue to Green
+                    // ratio 0: 0,0,255
+                    // ratio 0.5: 0,255,0
+                    const localRatio = ratio * 2; 
+                    r = 0;
+                    g = Math.floor(255 * localRatio);
+                    b = Math.floor(255 * (1 - localRatio) + 255 * localRatio); // Wait, Blue is 0,0,255. Green is 0,255,0.
+                    // Blue component: 255 -> 0
+                    b = Math.floor(255 * (1 - localRatio));
+                } else {
+                    // Green to Red
+                    // ratio 0.5: 0,255,0
+                    // ratio 1.0: 255,0,0
+                    const localRatio = (ratio - 0.5) * 2;
+                    r = Math.floor(255 * localRatio);
+                    g = Math.floor(255 * (1 - localRatio));
+                    b = 0;
+                }
+                
+                return `rgba(${r}, ${g}, ${b}, 0.7)`;
+            }
+
             new Chart(document.getElementById('tier1InterruptsHeatmap'), {
                 type: 'matrix',
                 data: {
@@ -906,12 +951,10 @@
                         label: 'Interrupts',
                         data: heatmapData,
                         backgroundColor(context) {
-                            if (!context.dataset || !context.dataset.data) return 'rgba(255, 99, 132, 0.1)';
+                            if (!context.dataset || !context.dataset.data) return 'rgba(200, 200, 200, 0.2)';
                             const dataPoint = context.dataset.data[context.dataIndex];
-                            if (!dataPoint || dataPoint.v === undefined) return 'rgba(255, 99, 132, 0.1)';
-                            const value = dataPoint.v;
-                            const alpha = Math.max(0.1, value / maxValue);  // Minimum 10% opacity
-                            return `rgba(255, 99, 132, ${alpha})`;
+                            if (!dataPoint || dataPoint.v === undefined) return 'rgba(200, 200, 200, 0.2)';
+                            return getHeatmapColor(dataPoint.v, maxValue);
                         },
                         borderWidth: 1,
                         borderColor: '#333',

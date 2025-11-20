@@ -129,7 +129,7 @@ get_gpu_freq_range() {
                 scaling_min=$(cat "$xe_path/min_freq")
                 scaling_max=$(cat "$xe_path/max_freq")
                 
-                echo "HW_MIN:$hw_min HW_MAX:$hw_max SCALING_MIN:$scaling_min SCALING_MAX:$scaling_max"
+                echo "TYPE:intel_xe HW_MIN:$hw_min HW_MAX:$hw_max SCALING_MIN:$scaling_min SCALING_MAX:$scaling_max"
                 return 0
             fi
         fi
@@ -142,7 +142,7 @@ get_gpu_freq_range() {
             scaling_min=$(cat "$i915_path/gt_min_freq_mhz")
             scaling_max=$(cat "$i915_path/gt_max_freq_mhz")
             
-            echo "HW_MIN:$hw_min HW_MAX:$hw_max SCALING_MIN:$scaling_min SCALING_MAX:$scaling_max"
+            echo "TYPE:intel_i915 HW_MIN:$hw_min HW_MAX:$hw_max SCALING_MIN:$scaling_min SCALING_MAX:$scaling_max"
             return 0
         fi
     done

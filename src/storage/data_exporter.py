@@ -658,10 +658,26 @@ class DataExporter:
         """
         if prev_raw is None:
             return None  # Skip first sample (no delta calculation possible)
+            
+        # Check for duplicate timestamp (prevent divide by zero or zero-delta glitches)
+        timestamp_ms = raw_data.get('timestamp_ms', timestamp * 1000)
+        prev_timestamp_ms = prev_raw.get('timestamp_ms', timestamp_ms)
+        
+        if timestamp_ms <= prev_timestamp_ms:
+            # FIX: Don't skip - use time delta = 1 second as fallback
+            print(f"⚠️  Duplicate timestamp {timestamp_ms}, using 1s fallback")
+            # Continue processing with assumed 1s interval
         
         # Calculate CPU usage
         cpu_usage = self._calculate_cpu_usage(raw_data['cpu_raw'], prev_raw['cpu_raw'])
-        
+
+        # FIX: Hold previous value if calculation failed
+        if cpu_usage < 0:
+            if self.session_data:  # Has previous samples
+                cpu_usage = self.session_data[-1]['cpu']['usage']['total']
+            else:
+                cpu_usage = 0.0
+                        
         # Per-core usage and freq
         per_core_usage = []
         per_core_freq = []
@@ -864,7 +880,7 @@ class DataExporter:
                     
                     if interrupt_json and 'interrupts' in interrupt_json:
                         # Calculate interrupt rates (deltas from previous sample)
-                        interrupt_rates = {}
+                        interrupt_list = []
                         
                         # Get previous interrupt data
                         prev_interrupt_str = prev_raw.get('interrupt_data') if prev_raw else None
@@ -884,15 +900,20 @@ class DataExporter:
                             prev_total = prev_interrupts.get(name, {}).get('total', total)
                             rate = max(0, total - prev_total)  # interrupts since last sample
                             
-                            interrupt_rates[name] = {
+                            interrupt_list.append({
+                                'name': name,
                                 'irq': irq['irq'],
                                 'total': total,
                                 'rate': rate,
                                 'cpu': irq['cpu'],
                                 'per_cpu': irq['per_cpu']
-                            }
+                            })
                         
-                        interrupt_stats = interrupt_rates
+                        # Sort by rate (descending) - most active interrupts first
+                        interrupt_list.sort(key=lambda x: x.get('rate', 0), reverse=True)
+                        
+                        # Use the same nested structure as local data source
+                        interrupt_stats = {'interrupts': interrupt_list}
                 except json.JSONDecodeError as e:
                     # If JSON parsing fails, print error
                     print(f"⚠️  JSON parse error for interrupt_data: {e}")
@@ -1059,6 +1080,13 @@ class DataExporter:
         if prev_raw is None:
             return None  # Skip first sample (no delta calculation possible)
         
+        # Check for duplicate timestamp (prevent divide by zero or zero-delta glitches)
+        timestamp_ms = raw_data.get('timestamp_ms', timestamp * 1000)
+        prev_timestamp_ms = prev_raw.get('timestamp_ms', timestamp_ms)
+        
+        if timestamp_ms <= prev_timestamp_ms:
+            return None  # Skip duplicate or out-of-order samples
+        
         # Calculate CPU usage
         cpu_usage = self._calculate_cpu_usage(raw_data['cpu_raw'], prev_raw['cpu_raw'])
         
@@ -1099,6 +1127,10 @@ class DataExporter:
             # Power (Watts) = Energy (J) / Time (s)
             # Energy (J) = energy_uj / 1,000,000
             cpu_power_watts = (energy_delta_uj / 1_000_000.0) / time_delta_sec
+            
+            # DEBUG: Trace why power is 0
+            if cpu_power_watts == 0 and prev_raw is not None:
+                 print(f"DEBUG: Zero Power at {timestamp}: PowerUJ={cpu_power_uj}, PrevUJ={prev_cpu_power_uj}, DeltaUJ={energy_delta_uj}, TimeDelta={time_delta_sec}")
         
         # Calculate monitor script's own CPU usage
         monitor_cpu_pct = 0.0
@@ -1315,7 +1347,7 @@ class DataExporter:
                     
                     if interrupt_json and 'interrupts' in interrupt_json:
                         # Calculate interrupt rates (deltas from previous sample)
-                        interrupt_rates = {}
+                        interrupt_list = []
                         
                         # Get previous interrupt data
                         prev_interrupt_str = prev_raw.get('interrupt_data') if prev_raw else None
@@ -1335,15 +1367,20 @@ class DataExporter:
                             prev_total = prev_interrupts.get(name, {}).get('total', total)
                             rate = max(0, total - prev_total)  # interrupts since last sample
                             
-                            interrupt_rates[name] = {
+                            interrupt_list.append({
+                                'name': name,
                                 'irq': irq['irq'],
                                 'total': total,
                                 'rate': rate,
                                 'cpu': irq['cpu'],
                                 'per_cpu': irq['per_cpu']
-                            }
+                            })
                         
-                        interrupt_stats = interrupt_rates
+                        # Sort by rate (descending) - most active interrupts first
+                        interrupt_list.sort(key=lambda x: x.get('rate', 0), reverse=True)
+                        
+                        # Use the same nested structure as local data source
+                        interrupt_stats = {'interrupts': interrupt_list}
                 except json.JSONDecodeError as e:
                     # If JSON parsing fails, print error
                     print(f"⚠️  JSON parse error for interrupt_data: {e}")
@@ -1386,8 +1423,12 @@ class DataExporter:
         d_total = d_user + d_nice + d_sys + d_idle + d_iowait + d_irq + d_softirq + d_steal
         d_active = d_total - d_idle - d_iowait
         
-        return (d_active * 100.0 / d_total) if d_total > 0 else 0.0
-    
+        # FIX: Return -1.0 if no ticks elapsed (duplicate sample or too fast)
+        if d_total <= 0:
+            return -1.0  # Signal: hold previous value
+        
+        return (d_active * 100.0 / d_total)
+
     def export_csv(self, filename: str = None, use_android_db: bool = True, use_ssh_db: bool = True) -> str:
         """Export session data to CSV format.
         
@@ -2204,11 +2245,22 @@ class DataExporter:
         # Get source name for the report
         source_name = self.data_source.get_source_name() if self.data_source else "Local System"
         
+        # Determine data source method based on which cache was populated
+        if self._db_cache['ssh']:
+            data_source_method = "Remote SSH Database"
+        elif self._db_cache['android']:
+            data_source_method = "Android Device Database"
+        elif self._db_cache['local']:
+            data_source_method = "Local Database"
+        else:
+            data_source_method = "In-Memory Session Data"
+        
         # Replace template variables
         html = template.replace('{{ start_time }}', self.start_time.strftime('%Y-%m-%d %H:%M:%S'))
         html = html.replace('{{ duration }}', str(duration))
         html = html.replace('{{ data_points }}', str(len(self.session_data)))
         html = html.replace('{{ source_name }}', source_name)
+        html = html.replace('{{ data_source_method }}', data_source_method)
         html = html.replace('{{ chart_data_json }}', json.dumps(chart_data).replace("'", "\\'"))
         html = html.replace('{{ npu_section }}', npu_section)
         html = html.replace('{{ network_section }}', network_section)

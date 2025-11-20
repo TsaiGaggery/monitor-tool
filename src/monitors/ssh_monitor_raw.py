@@ -334,6 +334,9 @@ class SSHMonitorRaw:
                     # Utilization = 100 - (rc6_delta / time_delta * 100)
                     idle_percentage = (runtime_delta / time_delta) * 100
                     gpu_util = int(max(0, min(100, 100 - idle_percentage)))
+            elif self._gpu_info and self._gpu_info.get('available'):
+                # If no time delta (duplicate sample), keep previous utilization
+                gpu_util = self._gpu_info.get('gpu_util', 0)
         
         # Update previous values for next calculation (not needed for NVIDIA, but keep for consistency)
         self._prev_gpu_runtime_ms = gpu_runtime_ms

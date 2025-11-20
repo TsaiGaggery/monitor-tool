@@ -5,7 +5,7 @@ import sys
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QTabWidget, QLabel, QGroupBox, QGridLayout,
                              QStatusBar, QAction, QMessageBox, QApplication)
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import QTimer, Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont
 
 from data_source import MonitorDataSource, LocalDataSource, AndroidDataSource, RemoteLinuxDataSource
@@ -19,6 +19,44 @@ from ui.widgets.temperature_bar import TemperaturePanel
 from ui.styles import apply_dark_theme, CHART_COLORS
 
 import time
+
+
+class ExportWorker(QThread):
+    """Worker thread for handling data export."""
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, exporter, export_type):
+        super().__init__()
+        self.exporter = exporter
+        self.export_type = export_type
+
+    def run(self):
+        try:
+            results = {}
+            # Always use the database (Android/SSH) if available to ensure data completeness
+            # The user explicitly requested to avoid using session cache for Android/SSH
+            # because it might miss data during connection drops.
+            use_db = True
+            
+            actual_count = self.exporter.get_export_sample_count(use_android_db=use_db)
+            
+            if self.export_type == 'all':
+                results['csv'] = self.exporter.export_csv()
+                results['json'] = self.exporter.export_json()
+                results['html'] = self.exporter.export_html(use_android_db=use_db)
+            elif self.export_type == 'csv':
+                results['csv'] = self.exporter.export_csv()
+            elif self.export_type == 'json':
+                results['json'] = self.exporter.export_json()
+            elif self.export_type == 'html':
+                results['html'] = self.exporter.export_html(use_android_db=use_db)
+            
+            results['count'] = actual_count
+            results['type'] = self.export_type
+            self.finished.emit(results)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class MainWindow(QMainWindow):
@@ -859,76 +897,67 @@ class MainWindow(QMainWindow):
             self.data_logger.cleanup_old_data(7)
             QMessageBox.information(self, 'Success', 'Old data cleaned up successfully')
     
+    def start_export(self, export_type):
+        """Start export in a background thread."""
+        if not self.data_exporter.session_data:
+            QMessageBox.warning(self, 'No Data', 'No monitoring data to export')
+            return
+
+        self.status_bar.showMessage(f"Exporting {export_type.upper()} data... Please wait.")
+        
+        self.export_worker = ExportWorker(self.data_exporter, export_type)
+        self.export_worker.finished.connect(self.on_export_finished)
+        self.export_worker.error.connect(self.on_export_error)
+        self.export_worker.start()
+
+    def on_export_finished(self, results):
+        """Handle export completion."""
+        self.status_bar.showMessage("Export completed successfully", 5000)
+        
+        count = results.get('count', 0)
+        export_type = results.get('type', 'unknown')
+        
+        msg = ""
+        if export_type == 'all':
+            msg = (f'Data exported to all formats:\n\n'
+                   f'CSV:  {results.get("csv")}\n'
+                   f'JSON: {results.get("json")}\n'
+                   f'HTML: {results.get("html")}\n\n'
+                   f'Samples: {count}')
+        elif export_type == 'csv':
+            msg = (f'Data exported to:\n{results.get("csv")}\n\n'
+                   f'Samples: {count}')
+        elif export_type == 'json':
+            msg = (f'Data exported to:\n{results.get("json")}\n\n'
+                   f'Samples: {count}')
+        elif export_type == 'html':
+            msg = (f'Report generated:\n{results.get("html")}\n\n'
+                   f'Samples: {count}')
+            
+        QMessageBox.information(self, 'Export Successful', msg)
+        self.export_worker = None
+
+    def on_export_error(self, error_msg):
+        """Handle export error."""
+        self.status_bar.showMessage("Export failed", 5000)
+        QMessageBox.critical(self, 'Export Failed', f'Error exporting data: {error_msg}')
+        self.export_worker = None
+
     def export_all(self):
         """Export monitoring data to all formats (CSV, JSON, HTML)."""
-        try:
-            if not self.data_exporter.session_data:
-                QMessageBox.warning(self, 'No Data', 'No monitoring data to export')
-                return
-            
-            # Get actual export count (accounts for DB sources vs session data)
-            actual_count = self.data_exporter.get_export_sample_count()
-            
-            # Export to all formats (default behavior: use DB for remote, session for local)
-            csv_path = self.data_exporter.export_csv()
-            json_path = self.data_exporter.export_json()
-            html_path = self.data_exporter.export_html()
-            
-            # Show success message with all paths and actual sample count
-            QMessageBox.information(self, 'Export Successful', 
-                                   f'Data exported to all formats:\n\n'
-                                   f'CSV:  {csv_path}\n'
-                                   f'JSON: {json_path}\n'
-                                   f'HTML: {html_path}\n\n'
-                                   f'Samples: {actual_count}')
-        except Exception as e:
-            QMessageBox.critical(self, 'Export Failed', f'Error exporting data: {str(e)}')
+        self.start_export('all')
     
     def export_csv(self):
         """Export monitoring data to CSV."""
-        try:
-            if not self.data_exporter.session_data:
-                QMessageBox.warning(self, 'No Data', 'No monitoring data to export')
-                return
-            
-            actual_count = self.data_exporter.get_export_sample_count()
-            filepath = self.data_exporter.export_csv()
-            QMessageBox.information(self, 'Export Successful', 
-                                   f'Data exported to:\n{filepath}\n\n'
-                                   f'Samples: {actual_count}')
-        except Exception as e:
-            QMessageBox.critical(self, 'Export Failed', f'Error exporting data: {str(e)}')
+        self.start_export('csv')
     
     def export_json(self):
         """Export monitoring data to JSON."""
-        try:
-            if not self.data_exporter.session_data:
-                QMessageBox.warning(self, 'No Data', 'No monitoring data to export')
-                return
-            
-            actual_count = self.data_exporter.get_export_sample_count()
-            filepath = self.data_exporter.export_json()
-            QMessageBox.information(self, 'Export Successful', 
-                                   f'Data exported to:\n{filepath}\n\n'
-                                   f'Samples: {actual_count}')
-        except Exception as e:
-            QMessageBox.critical(self, 'Export Failed', f'Error exporting data: {str(e)}')
+        self.start_export('json')
     
     def export_html(self):
         """Export monitoring data to HTML report."""
-        try:
-            if not self.data_exporter.session_data:
-                QMessageBox.warning(self, 'No Data', 'No monitoring data to export')
-                return
-            
-            actual_count = self.data_exporter.get_export_sample_count(use_android_db=False)
-            # Use session_data directly, don't pull from Android DB (use_android_db=False)
-            filepath = self.data_exporter.export_html(use_android_db=False)
-            QMessageBox.information(self, 'Export Successful', 
-                                   f'Report generated:\n{filepath}\n\n'
-                                   f'Samples: {actual_count}')
-        except Exception as e:
-            QMessageBox.critical(self, 'Export Failed', f'Error exporting data: {str(e)}')
+        self.start_export('html')
     
     def clear_export_session(self):
         """Clear current export session data."""

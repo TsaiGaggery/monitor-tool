@@ -136,11 +136,7 @@ class CPUMonitor:
         return per_core_details
     
     def get_power(self) -> Optional[float]:
-        """Get CPU package power consumption in Watts using Intel RAPL.
-        
-        Returns:
-            Power in Watts, or None if not available
-        """
+        """Get CPU package power consumption in Watts using Intel RAPL."""
         if not self._rapl_available:
             return None
         
@@ -153,10 +149,7 @@ class CPUMonitor:
             
             current_time = time.time()
             
-            # Need two samples to calculate power
             if self._prev_energy_uj is not None and self._prev_energy_time is not None:
-                # Calculate energy delta (handle counter wrap-around)
-                # RAPL counter is 32-bit and wraps around
                 with open('/sys/class/powercap/intel-rapl/intel-rapl:0/max_energy_range_uj', 'r') as f:
                     max_range = int(f.read().strip())
                 
@@ -167,8 +160,12 @@ class CPUMonitor:
                 time_delta_sec = current_time - self._prev_energy_time
                 
                 if time_delta_sec > 0:
-                    # Power (Watts) = Energy (Joules) / Time (seconds)
-                    # Convert microjoules to joules: uj / 1,000,000
+                    # FIX: Return None if energy didn't change (counter resolution limit)
+                    # Caller should use previous power value in this case
+                    if energy_delta_uj == 0:
+                        # Don't update stored values - wait for next non-zero delta
+                        return None  # Signal "no new data"
+                    
                     power_watts = (energy_delta_uj / 1_000_000) / time_delta_sec
                     
                     # Store current values for next calculation
@@ -177,13 +174,12 @@ class CPUMonitor:
                     
                     return power_watts
             
-            # First sample or time delta is 0
+            # First sample
             self._prev_energy_uj = current_energy_uj
             self._prev_energy_time = current_time
             return None
             
         except Exception as e:
-            print(f"Error reading CPU power: {e}")
             return None
     
     def get_all_info(self) -> Dict:
@@ -206,7 +202,13 @@ class CPUMonitor:
         
         # Get CPU power consumption
         cpu_power = self.get_power()
-        
+
+        # FIX: Hold previous power value if new measurement is None (zero delta)
+        if cpu_power is None:
+            cpu_power = getattr(self, '_last_valid_power', None)
+        else:
+            self._last_valid_power = cpu_power  # Save for next iteration
+                
         return {
             'usage': self.get_usage(),
             'frequency': self.get_frequency(),

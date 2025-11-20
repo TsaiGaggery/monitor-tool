@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from data_source import MonitorDataSource, LocalDataSource, AndroidDataSource, RemoteLinuxDataSource
 from storage import DataLogger, DataExporter
-from controllers import FrequencyController, ADBFrequencyController
+from controllers import FrequencyController, ADBFrequencyController, SSHFrequencyController
 from monitoring_snapshot import MonitoringSnapshot
 
 
@@ -77,9 +77,29 @@ class CLIMonitor:
                 self.freq_controller = None
                 print(f"⚠️  Android frequency control disabled (requires root)")
         elif isinstance(self.data_source, RemoteLinuxDataSource):
-            # Remote Linux via SSH - frequency control not supported yet
-            self.freq_controller = None
-            print(f"⚠️  Frequency control not supported for remote Linux")
+            # Remote Linux system via SSH
+            from controllers import SSHFrequencyController
+            
+            ssh_freq_ctrl = SSHFrequencyController(
+                host=self.data_source.ssh_monitor.host,
+                port=self.data_source.ssh_monitor.port,
+                user=self.data_source.ssh_monitor.user,
+                password=self.data_source.ssh_monitor.password,
+                key_path=self.data_source.ssh_monitor.key_path
+            )
+            
+            # Only use if available (cpufreq support)
+            if ssh_freq_ctrl.is_available:
+                self.freq_controller = ssh_freq_ctrl
+                
+                if ssh_freq_ctrl.has_sudo:
+                    print(f"✅ SSH frequency control enabled (full access)")
+                else:
+                    print(f"⚠️  SSH frequency control enabled (read-only, no passwordless sudo)")
+                    print(f"    Press 'c' or 'g' to see setup instructions")
+            else:
+                self.freq_controller = None
+                print(f"⚠️  SSH frequency control disabled (no cpufreq support on remote)")
         else:
             self.freq_controller = None
         

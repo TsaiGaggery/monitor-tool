@@ -774,6 +774,12 @@ class RemoteLinuxDataSource(MonitorDataSource):
         self._prev_net_time = None  # Separate timestamp for network
         self._prev_disk_sectors = None
         self._prev_disk_time = None  # Separate timestamp for disk
+        
+        # Cache for last calculated values (to handle duplicate timestamps)
+        self._cached_cpu_info = None
+        self._cached_network_info = None
+        self._cached_disk_info = None
+        self._cached_tier1_info = None
     
     def connect(self) -> bool:
         """Connect to remote Linux system via SSH."""
@@ -842,6 +848,10 @@ class RemoteLinuxDataSource(MonitorDataSource):
         cpu_power_uj = raw_data.get('cpu_power_uj', 0)
         timestamp_ms = raw_data.get('timestamp_ms', 0)
         
+        # Check if we already processed this timestamp
+        if self._prev_cpu_time == timestamp_ms and self._cached_cpu_info:
+            return self._cached_cpu_info
+        
         # Calculate CPU Power (Watts)
         power_watts = 0.0
         if self._prev_cpu_power_uj is not None and self._prev_cpu_time is not None:
@@ -870,7 +880,7 @@ class RemoteLinuxDataSource(MonitorDataSource):
         cpu_count = len(per_core_raw)
         monitor_cpu_usage = self._calculate_monitor_cpu_usage(raw_data, cpu_raw, cpu_count)
         
-        return {
+        result = {
             'cpu_count': cpu_count,
             'physical_count': len(per_core_raw),  # Simplified
             'usage': {
@@ -885,6 +895,9 @@ class RemoteLinuxDataSource(MonitorDataSource):
             'power_watts': power_watts,
             'monitor_cpu_usage': monitor_cpu_usage
         }
+        
+        self._cached_cpu_info = result
+        return result
     
     def _calculate_cpu_usage(self, cpu_raw: Dict, per_core_raw: list, timestamp_ms: int) -> Dict:
         """Calculate CPU usage from raw data (using correct delta algorithm).
@@ -1082,6 +1095,10 @@ class RemoteLinuxDataSource(MonitorDataSource):
         net_tx = raw_data.get('net_tx_bytes', 0)
         timestamp_ms = raw_data.get('timestamp_ms', 0)  # Use REMOTE timestamp, not local time
         
+        # Check if we already processed this timestamp
+        if self._prev_net_time == timestamp_ms and self._cached_network_info:
+            return self._cached_network_info
+        
         # Calculate speeds
         upload_speed = 0.0
         download_speed = 0.0
@@ -1095,7 +1112,7 @@ class RemoteLinuxDataSource(MonitorDataSource):
         self._prev_net_bytes = (net_rx, net_tx)
         self._prev_net_time = timestamp_ms  # Store remote timestamp in milliseconds
         
-        return {
+        result = {
             'upload_speed': upload_speed,
             'download_speed': download_speed,
             'connections': {'total': 0, 'tcp_established': 0},
@@ -1108,6 +1125,9 @@ class RemoteLinuxDataSource(MonitorDataSource):
                 'packets_recv': 0
             }
         }
+        
+        self._cached_network_info = result
+        return result
     
     def get_disk_info(self) -> Dict:
         """Get disk information from remote system."""
@@ -1118,6 +1138,10 @@ class RemoteLinuxDataSource(MonitorDataSource):
         disk_read = raw_data.get('disk_read_sectors', 0)
         disk_write = raw_data.get('disk_write_sectors', 0)
         timestamp_ms = raw_data.get('timestamp_ms', 0)
+        
+        # Check if we already processed this timestamp
+        if self._prev_disk_time == timestamp_ms and self._cached_disk_info:
+            return self._cached_disk_info
         
         # Calculate speeds (sectors = 512 bytes, use remote device timestamp)
         read_speed = 0.0
@@ -1133,7 +1157,7 @@ class RemoteLinuxDataSource(MonitorDataSource):
         self._prev_disk_sectors = (disk_read, disk_write)
         self._prev_disk_time = timestamp_ms  # Store remote timestamp in milliseconds
         
-        return {
+        result = {
             'read_speed_mb': read_speed / (1024 * 1024),
             'write_speed_mb': write_speed / (1024 * 1024),
             'partitions': {},
@@ -1148,6 +1172,9 @@ class RemoteLinuxDataSource(MonitorDataSource):
             },
             'partition_usage': []
         }
+        
+        self._cached_disk_info = result
+        return result
     
     def get_tier1_info(self) -> Dict:
         """Get Tier 1 metrics from remote Linux system.
@@ -1173,18 +1200,24 @@ class RemoteLinuxDataSource(MonitorDataSource):
                 self._prev_ssh_ctxt = raw_data_init.get('ctxt', 0)
                 self._prev_ssh_ctxt_timestamp_ms = raw_data_init.get('timestamp_ms', 0)
                 
-                # Wait for next update cycle to get fresh data (remote script updates every 1 sec)
+                # Initial baseline set, next call will have valid delta
+                # IMPORTANT: Wait a bit so next call gets fresh data with different timestamp
                 import time
-                time.sleep(1.2)  # Wait for next sample to ensure we get fresh data
-        
+                time.sleep(0.1)  # 100ms wait ensures next sample is fresh
+                
         # Get raw data from SSH monitor
         raw_data = self.ssh_monitor.get_latest_data()
         if not raw_data:
             return {}
         
+        timestamp_ms = raw_data.get('timestamp_ms', 0)
+        
+        # Check if we already processed this timestamp
+        #if hasattr(self, '_prev_ssh_ctxt_timestamp_ms') and self._prev_ssh_ctxt_timestamp_ms == timestamp_ms and self._cached_tier1_info:
+        #    return self._cached_tier1_info
+        
         # Calculate context switches per second (need delta from previous sample)
         ctxt = raw_data.get('ctxt', 0)
-        timestamp_ms = raw_data.get('timestamp_ms', 0)
         
         ctx_switches_per_sec = 0
         if hasattr(self, '_prev_ssh_ctxt') and hasattr(self, '_prev_ssh_ctxt_timestamp_ms'):
@@ -1193,6 +1226,9 @@ class RemoteLinuxDataSource(MonitorDataSource):
             if delta_time_ms > 0 and delta_ctxt > 0:
                 ctx_switches_per_sec = int((delta_ctxt * 1000.0) / delta_time_ms)
         
+        # FIX: Update timestamp BEFORE interrupt calculation (not after)
+        prev_timestamp_for_irq = self._prev_ssh_ctxt_timestamp_ms if hasattr(self, '_prev_ssh_ctxt_timestamp_ms') else 0
+
         self._prev_ssh_ctxt = ctxt
         self._prev_ssh_ctxt_timestamp_ms = timestamp_ms
         
@@ -1225,10 +1261,10 @@ class RemoteLinuxDataSource(MonitorDataSource):
                 irq_key = irq.get('irq', '') or irq.get('name', '')
                 curr_total = irq.get('total', 0)
                 
-                if irq_key in self._prev_ssh_interrupts and timestamp_ms > self._prev_ssh_ctxt_timestamp_ms:
+                if irq_key in self._prev_ssh_interrupts and prev_timestamp_for_irq > 0 and timestamp_ms > prev_timestamp_for_irq:
                     prev_total = self._prev_ssh_interrupts[irq_key]
                     delta = curr_total - prev_total
-                    delta_time_ms = timestamp_ms - self._prev_ssh_ctxt_timestamp_ms
+                    delta_time_ms = timestamp_ms - prev_timestamp_for_irq
                     if delta >= 0 and delta_time_ms > 0:
                         irq['rate'] = int((delta * 1000.0) / delta_time_ms)
                     else:
@@ -1249,17 +1285,20 @@ class RemoteLinuxDataSource(MonitorDataSource):
         
         # Add per-core IRQ/softirq percentages if available
         per_core_irq = raw_data.get('per_core_irq_pct')
-        per_core_softirq = raw_data.get('per_core_softirq_pct')
         if per_core_irq:
-            tier1_data['per_core_irq_pct'] = per_core_irq
+            try:
+                tier1_data['per_core_irq_pct'] = [float(x) for x in per_core_irq.split(',') if x]
+            except:
+                tier1_data['per_core_irq_pct'] = []
+        
+        per_core_softirq = raw_data.get('per_core_softirq_pct')
         if per_core_softirq:
-            tier1_data['per_core_softirq_pct'] = per_core_softirq
+            try:
+                tier1_data['per_core_softirq_pct'] = [float(x) for x in per_core_softirq.split(',') if x]
+            except:
+                tier1_data['per_core_softirq_pct'] = []
         
-        # Include device timestamp_ms for accurate rate calculation in exporter
-        # CRITICAL: Interrupt counts are collected on remote device time, so we must use
-        # remote timestamp_ms (not host time_seconds) for rate calculations
-        tier1_data['timestamp_ms'] = timestamp_ms
-        
+        # FIX: Remove caching - return fresh data
         return tier1_data
     
     def get_source_name(self) -> str:

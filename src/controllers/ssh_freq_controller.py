@@ -293,7 +293,12 @@ class SSHFrequencyController:
                             key, val = part.split(':')
                             freq_dict[key.lower()] = int(val)
                     
-                    return freq_dict
+                    return {
+                        'hardware_min': freq_dict.get('hw_min', 0),
+                        'hardware_max': freq_dict.get('hw_max', 0),
+                        'scaling_min': freq_dict.get('scaling_min', 0),
+                        'scaling_max': freq_dict.get('scaling_max', 0)
+                    }
         return {}
     
     def set_cpu_freq_range(self, min_mhz: int, max_mhz: int, cpu_id: Optional[int] = None) -> bool:
@@ -321,7 +326,7 @@ class SSHFrequencyController:
         """Get min/max frequency range for GPU.
         
         Returns:
-            dict with keys: hw_min, hw_max, scaling_min, scaling_max (all in MHz)
+            dict with keys: hardware_min, hardware_max, scaling_min, scaling_max (all in MHz)
         """
         if not self.is_available:
             return {}
@@ -334,14 +339,23 @@ class SSHFrequencyController:
                     if freq_info == "N/A":
                         return {}
                     
-                    # Parse: HW_MIN:300 HW_MAX:2050 SCALING_MIN:300 SCALING_MAX:2050
+                    # Parse: TYPE:intel_xe HW_MIN:300 HW_MAX:2050 SCALING_MIN:300 SCALING_MAX:2050
                     freq_dict = {}
                     for part in freq_info.split():
                         if ':' in part:
                             key, val = part.split(':')
-                            freq_dict[key.lower()] = int(val)
+                            if key == 'TYPE':
+                                freq_dict['type'] = val
+                            else:
+                                freq_dict[key.lower()] = int(val)
                     
-                    return freq_dict
+                    return {
+                        'type': freq_dict.get('type', 'unknown'),
+                        'hardware_min': freq_dict.get('hw_min', 0),
+                        'hardware_max': freq_dict.get('hw_max', 0),
+                        'scaling_min': freq_dict.get('scaling_min', 0),
+                        'scaling_max': freq_dict.get('scaling_max', 0)
+                    }
         return {}
     
     def set_gpu_freq_range(self, min_mhz: int, max_mhz: int) -> bool:

@@ -349,7 +349,7 @@ systemctl --user start monitor-tool
 MIT License - Issues and PRs welcome!
 
 **Author**: TsaiGaggery  
-**Version**: 1.0.0
+**Version**: 1.0
 
 
 ## Key Features
@@ -669,18 +669,21 @@ TsaiGaggery
 
 ## Changelog
 
-### v1.1.0 (2025-11-15)
-- Added Debian package support
-- Added dual-axis real-time charts (usage + frequency)
-- Fixed GPU frequency reading (always use actual frequency)
-- Added color-coded legends for dual-axis charts
-- Translated all documentation to English
-- Export All functionality (Ctrl+E)
-- Comprehensive HTML reports with 13+ interactive charts
-
-### v1.0.0 (2025-11-14)
-- Initial release
-- CPU/GPU/NPU/Memory monitoring
-- Frequency control
-- Data logging and export
+### v1.0 (2025-11-20)
+- **Initial stable release**
+- CPU/GPU/NPU/Memory/Network/Disk monitoring
+- Multi-mode support: Local, Remote Linux (SSH), Android (ADB)
+- Frequency control for CPU/GPU (Local and SSH modes)
 - PyQt5 GUI with real-time charts
+- CLI mode for headless/server environments
+- Data logging to SQLite database
+- Export to CSV/JSON/HTML formats
+- Interactive HTML reports with 13+ charts
+- **Bug fixes**:
+  - Fixed SSH interrupt rates showing all zeros
+  - Fixed CPU power drops to zero in reports
+  - Fixed SSH frequency control support in CLI
+  - Fixed template variable replacement in exports
+- Comprehensive test suite (152 unit tests, 40% coverage)
+- Debian package support
+- Auto cleanup of old monitoring data (>3 days)
