@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from data_source import MonitorDataSource, LocalDataSource, AndroidDataSource, RemoteLinuxDataSource
 from storage import DataLogger, DataExporter
 from controllers import FrequencyController, ADBFrequencyController
+from monitoring_snapshot import MonitoringSnapshot
 
 
 class CLIMonitor:
@@ -128,17 +129,20 @@ class CLIMonitor:
         bar = '█' * filled + '░' * (width - filled)
         return f"[{bar}] {percent:5.1f}%"
         
-    def _get_all_data(self) -> Dict:
-        """Get all monitoring data."""
-        return {
-            'timestamp': datetime.now().isoformat(),
-            'cpu': self.data_source.get_cpu_info(),
-            'memory': self.data_source.get_memory_info(),
-            'gpu': self.data_source.get_gpu_info(),
-            'npu': self.data_source.get_npu_info(),
-            'network': self.data_source.get_network_info(),
-            'disk': self.data_source.get_disk_info(),
-        }
+    def _get_all_data(self) -> MonitoringSnapshot:
+        """Get all monitoring data in unified format.
+        
+        Returns:
+            MonitoringSnapshot with all available data
+        """
+        # Process any queued samples for SSH/Android (if applicable)
+        if hasattr(self.data_source, 'process_queued_samples'):
+            self.data_source.process_queued_samples()
+        
+        # Get unified snapshot from data source
+        snapshot = MonitoringSnapshot.from_data_source(self.data_source)
+        
+        return snapshot
         
     def display_once(self, format: str = 'text', output_file: Optional[str] = None):
         """Display monitoring data once.
@@ -147,14 +151,14 @@ class CLIMonitor:
             format: Output format ('text', 'json', 'simple')
             output_file: Optional file to write output to
         """
-        data = self._get_all_data()
+        snapshot = self._get_all_data()
         
         if format == 'json':
-            output = json.dumps(data, indent=2)
+            output = json.dumps(snapshot.to_dict(), indent=2)
         elif format == 'simple':
-            output = self._format_simple(data)
+            output = self._format_simple(snapshot)
         else:  # text
-            output = self._format_dashboard(data)
+            output = self._format_dashboard(snapshot)
             
         if output_file:
             with open(output_file, 'w') as f:
@@ -163,18 +167,23 @@ class CLIMonitor:
         else:
             print(output)
             
-    def _format_simple(self, data: Dict) -> str:
+    def _format_simple(self, snapshot: MonitoringSnapshot) -> str:
         """Format data in simple one-line format."""
-        cpu = data['cpu']
-        mem = data['memory']['memory']
-        gpu = data['gpu']
-        net = data['network']
-        disk = data['disk']
+        cpu = snapshot.cpu
+        mem = snapshot.memory['memory']
+        gpu = snapshot.gpu
+        net = snapshot.network
+        disk = snapshot.disk
         
         parts = [
             f"CPU: {cpu['usage']['total']:.1f}%",
             f"Mem: {mem['percent']:.1f}%",
         ]
+        
+        # Add CPU power if available
+        cpu_power = cpu.get('power_watts')
+        if cpu_power is not None and cpu_power > 0:
+            parts[0] = f"CPU: {cpu['usage']['total']:.1f}% ({cpu_power:.1f}W)"
         
         if gpu['available'] and gpu['gpus']:
             gpu_util = gpu['gpus'][0].get('gpu_util', 0)
@@ -192,7 +201,7 @@ class CLIMonitor:
             
         return " | ".join(parts)
         
-    def _format_dashboard(self, data: Dict) -> str:
+    def _format_dashboard(self, snapshot: MonitoringSnapshot) -> str:
         """Format data as a well-organized dashboard with two-column layout."""
         lines = []
         width = self.term_width
@@ -200,7 +209,7 @@ class CLIMonitor:
         
         # Header
         lines.append("=" * width)
-        title = f" System Monitor - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        title = f" System Monitor - {snapshot.timestamp}"
         lines.append(title.ljust(width))
         lines.append("=" * width)
         
@@ -209,7 +218,7 @@ class CLIMonitor:
         right_lines = []
         
         # LEFT COLUMN - CPU
-        cpu = data['cpu']
+        cpu = snapshot.cpu
         left_lines.append("📊 CPU")
         left_lines.append(f"  Overall: {self._format_bar(cpu['usage']['total'], 20)}")
         left_lines.append(f"  Cores: {cpu['cpu_count']} (Phys: {cpu['physical_count']})")
@@ -224,6 +233,11 @@ class CLIMonitor:
                     left_lines.append(f"  Temp: {temp:.1f}°C")
                 break
         
+        # Power (Intel RAPL)
+        power = cpu.get('power_watts')
+        if power is not None and power > 0:
+            left_lines.append(f"  Power: {power:.1f} W")
+        
         # Per-core usage (all cores, compact format)
         left_lines.append("  Cores:")
         cores = cpu['usage']['per_core']
@@ -234,7 +248,7 @@ class CLIMonitor:
             left_lines.append(core_line)
         
         # RIGHT COLUMN - Memory
-        mem_data = data['memory']
+        mem_data = snapshot.memory
         mem = mem_data['memory']
         swap = mem_data['swap']
         
@@ -253,7 +267,7 @@ class CLIMonitor:
             right_lines.append(f"  {swap['used']:.1f} / {swap['total']:.1f} GB")
         
         # GPU in right column
-        gpu = data['gpu']
+        gpu = snapshot.gpu
         if gpu['available'] and gpu['gpus']:
             right_lines.append("")
             right_lines.append("🎮 GPU")
@@ -299,7 +313,7 @@ class CLIMonitor:
             lines.append(combined.ljust(width))
         
         # NPU Section (if available, full width)
-        npu = data['npu']
+        npu = snapshot.npu
         if npu.get('available'):
             lines.append("".ljust(width))
             lines.append("🧠 NPU".ljust(width))
@@ -310,7 +324,7 @@ class CLIMonitor:
                 lines.append(f"  Power: {npu['power']:.2f} W".ljust(width))
         
         # Network Section (simplified)
-        net = data['network']
+        net = snapshot.network
         if net['io_stats']:
             io = net['io_stats']
             # Convert bytes/sec to MB/s (1 MB = 1024 * 1024 bytes)
@@ -332,7 +346,7 @@ class CLIMonitor:
                 lines.append(f"  Active: {iface_list}".ljust(width))
         
         # Disk Section (simplified)
-        disk = data['disk']
+        disk = snapshot.disk
         if disk['io_stats']:
             io = disk['io_stats']
             # Prefer pre-calculated MB/s values if available
@@ -352,6 +366,49 @@ class CLIMonitor:
                     path = part['path'][:20]  # Truncate long paths
                     lines.append(f"    {path:20s} {self._format_bar(part['percent'], 12)} {part['used']:5.0f}/{part['total']:5.0f} GB".ljust(width))
         
+        # Tier 1 Metrics Section (if available)
+        tier1 = snapshot.tier1
+        if tier1 and any(tier1.values()):
+            lines.append("".ljust(width))
+            lines.append("📊 System Metrics (Tier 1)".ljust(width))
+            
+            # Context switches (show prominently)
+            ctx_switches = tier1.get('context_switches', 0)
+            if ctx_switches > 0:
+                lines.append(f"  Context Switches: {ctx_switches:,}/s".ljust(width))
+            
+            # Load average
+            load_avg = tier1.get('load_avg', {}) or tier1.get('load_average', {})
+            if load_avg:
+                load_1 = load_avg.get('1min', 0)
+                load_5 = load_avg.get('5min', 0)
+                load_15 = load_avg.get('15min', 0)
+                if any([load_1, load_5, load_15]):
+                    lines.append(f"  Load Average: {load_1:.2f} (1m)  {load_5:.2f} (5m)  {load_15:.2f} (15m)".ljust(width))
+            
+            # Process counts (handle both field name variations)
+            process_counts = tier1.get('process_counts', {}) or tier1.get('processes', {})
+            if process_counts:
+                running = process_counts.get('running', 0)
+                blocked = process_counts.get('blocked', 0)
+                total = process_counts.get('total', 0)
+                if total > 0:
+                    lines.append(f"  Processes: {total} total, {running} running, {blocked} blocked".ljust(width))
+                elif running or blocked:
+                    lines.append(f"  Processes: {running} running, {blocked} blocked".ljust(width))
+            
+            # Interrupts (top 5)
+            interrupts = tier1.get('interrupts', {})
+            if interrupts and 'interrupts' in interrupts:
+                irq_list = interrupts['interrupts']
+                if irq_list:
+                    lines.append("  Top Interrupts (counts/sec):".ljust(width))
+                    for irq in irq_list[:5]:  # Top 5
+                        name = irq.get('name', 'Unknown')[:25]
+                        # Try rate first (delta), fallback to total
+                        count = irq.get('rate', irq.get('total', 0))
+                        lines.append(f"    {name:25s} {count:>10,}".ljust(width))
+        
         # Footer
         lines.append("".ljust(width))
         lines.append("=" * width)
@@ -369,6 +426,7 @@ class CLIMonitor:
         next_log_time = time.time()
         logging_start_time = time.time()  # Track when logging actually started (PC time)
         android_start_timestamp_ms = None  # Track Android device start time (for ADB mode)
+        last_logged_device_timestamp_ms = None  # Track last device timestamp to avoid duplicate samples
         
         while self.running:
             try:
@@ -376,47 +434,48 @@ class CLIMonitor:
                 
                 # Check if it's time to collect and log data
                 if current_time >= next_log_time:
-                    # Get monitoring data
-                    data = self._get_all_data()
+                    # Get monitoring data as unified snapshot
+                    snapshot = self._get_all_data()
+                    
+                    # Calculate time_seconds for session tracking
+                    if hasattr(self.data_source, 'get_timestamp_ms'):
+                        # Android mode: use device timestamp
+                        android_timestamp_ms = self.data_source.get_timestamp_ms()
+                        if android_start_timestamp_ms is None:
+                            android_start_timestamp_ms = android_timestamp_ms
+                        snapshot.time_seconds = (android_timestamp_ms - android_start_timestamp_ms) / 1000.0
+                        
+                        # Skip logging if device timestamp hasn't changed (duplicate sample)
+                        # This happens when PC logs faster than device produces new samples
+                        if last_logged_device_timestamp_ms is not None and android_timestamp_ms == last_logged_device_timestamp_ms:
+                            # Update display but don't log duplicate to database/exporter
+                            with self.logging_lock:
+                                self.latest_data = snapshot
+                            next_log_time += self.update_interval
+                            continue
+                        
+                        last_logged_device_timestamp_ms = android_timestamp_ms
+                    else:
+                        # Local/SSH mode: use PC time
+                        snapshot.time_seconds = current_time - logging_start_time
                     
                     # Store latest data for UI thread (thread-safe)
                     with self.logging_lock:
-                        self.latest_data = data
+                        self.latest_data = snapshot
                     
                     # Log data to database (only for local monitoring)
                     if self.logger:
                         self.logger.log_data(
-                            cpu_info=data['cpu'],
-                            memory_info=data['memory'],
-                            gpu_info=data['gpu'],
-                            npu_info=data['npu']
+                            cpu_info=snapshot.cpu,
+                            memory_info=snapshot.memory,
+                            gpu_info=snapshot.gpu,
+                            npu_info=snapshot.npu,
+                            tier1_info=snapshot.tier1  # Tier1 now automatically included!
                         )
                     
-                    # Add to session exporter (for Android mode export)
+                    # Add to session exporter (for Android/SSH export)
                     if self.data_exporter:
-                        # Get time_seconds (use Android timestamp for ADB, PC time for local)
-                        if hasattr(self.data_source, 'get_timestamp_ms'):
-                            # Android mode: use device timestamp
-                            android_timestamp_ms = self.data_source.get_timestamp_ms()
-                            if android_start_timestamp_ms is None:
-                                android_start_timestamp_ms = android_timestamp_ms
-                            time_seconds = (android_timestamp_ms - android_start_timestamp_ms) / 1000.0
-                        else:
-                            # Local mode: use PC time
-                            time_seconds = current_time - logging_start_time
-                        
-                        export_data = {
-                            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(current_time)),
-                            'time_seconds': time_seconds,
-                            'cpu': data['cpu'],
-                            'memory': data['memory'],
-                            'gpu': data['gpu'],
-                            'network': data['network'],
-                            'disk': data['disk']
-                        }
-                        if data['npu'].get('available', False):
-                            export_data['npu'] = data['npu']
-                        self.data_exporter.add_sample(export_data)
+                        self.data_exporter.add_sample(snapshot.to_dict())
                     
                     # Schedule next log time (prevents drift)
                     next_log_time += self.update_interval
@@ -858,6 +917,7 @@ class CLIMonitor:
         while self.running:
             try:
                 # Check for user input (Ctrl+C or 'q' to quit)
+                # Non-blocking: getch() returns -1 if no key pressed
                 key = stdscr.getch()
                 if key == ord('q') or key == 3:  # 'q' or Ctrl+C
                     break
@@ -872,24 +932,25 @@ class CLIMonitor:
                 
                 # Get latest data from background thread (thread-safe)
                 with self.logging_lock:
-                    data = self.latest_data
+                    snapshot = self.latest_data
                 
                 # Skip if no data available yet
-                if data is None:
+                if snapshot is None:
                     time.sleep(0.05)
                     continue
                 
                 # Check if it's time to update display
                 current_time = time.time()
                 if current_time - last_update < self.update_interval:
-                    time.sleep(0.05)  # Short sleep to avoid busy waiting
+                    # Don't sleep here - just continue to check for input again
+                    # This makes the loop more responsive to 'q' key presses
                     continue
                 
                 last_update = current_time
                 
                 # Clear screen and draw dashboard
                 stdscr.clear()
-                dashboard = self._format_dashboard(data)
+                dashboard = self._format_dashboard(snapshot)
                 
                 # Draw each line
                 for i, line in enumerate(dashboard.split('\n')):
@@ -1281,9 +1342,9 @@ Note: Logging is always enabled. Use --export-format to auto-export when you qui
     elif args.adb:
         print(f"🤖 Android Monitor Mode")
         print(f"📱 Device: {args.ip}:{args.port}")
-        data_source = AndroidDataSource(args.ip, args.port)
+        data_source = AndroidDataSource(args.ip, args.port, enable_tier1=enable_tier1)
     else:
-        data_source = LocalDataSource()
+        data_source = LocalDataSource(enable_tier1=enable_tier1)
     
     # Create monitor instance (logging always enabled)
     monitor = CLIMonitor(data_source=data_source, update_interval=args.interval)

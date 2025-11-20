@@ -902,12 +902,12 @@ class DataExporter:
             # Add tier1 section to sample
             sample['tier1'] = {
                 'context_switches': delta_ctxt,
-                'load_average': {
+                'load_avg': {
                     '1min': load_1m,
                     '5min': load_5m,
                     '15min': load_15m
                 },
-                'processes': {
+                'process_counts': {
                     'running': procs_running,
                     'blocked': procs_blocked
                 },
@@ -1353,12 +1353,12 @@ class DataExporter:
             # Add tier1 section to sample
             sample['tier1'] = {
                 'context_switches': delta_ctxt,
-                'load_average': {
+                'load_avg': {
                     '1min': load_1m,
                     '5min': load_5m,
                     '15min': load_15m
                 },
-                'processes': {
+                'process_counts': {
                     'running': procs_running,
                     'blocked': procs_blocked
                 },
@@ -1915,7 +1915,7 @@ class DataExporter:
                     tier1_context_switches.append(tier1_data.get('context_switches') or 0)
                     
                     # Load average
-                    load_avg = tier1_data.get('load_average', {})
+                    load_avg = tier1_data.get('load_avg', {})
                     if isinstance(load_avg, dict):
                         tier1_load_avg_1m.append(load_avg.get('1min') or 0)
                         tier1_load_avg_5m.append(load_avg.get('5min') or 0)
@@ -1926,7 +1926,7 @@ class DataExporter:
                         tier1_load_avg_15m.append(0)
                     
                     # Processes
-                    procs = tier1_data.get('processes', {})
+                    procs = tier1_data.get('process_counts', {})
                     if isinstance(procs, dict):
                         tier1_procs_running.append(procs.get('running') or 0)
                         tier1_procs_blocked.append(procs.get('blocked') or 0)
@@ -1938,14 +1938,35 @@ class DataExporter:
                     tier1_per_core_irq.append(tier1_data.get('per_core_irq_pct', []))
                     tier1_per_core_softirq.append(tier1_data.get('per_core_softirq_pct', []))
                     
-                    # Interrupt data - extract from dict for each sample
-                    interrupts_dict = tier1_data.get('interrupts', None)
-                    if interrupts_dict and isinstance(interrupts_dict, dict):
-                        # Store the interrupt dict for this timestamp
-                        interrupt_samples.append({
-                            'timestamp_idx': idx,
-                            'interrupts': interrupts_dict
-                        })
+                    # Interrupt data - convert from list format to dict format
+                    interrupts_data = tier1_data.get('interrupts', None)
+                    if interrupts_data and isinstance(interrupts_data, dict):
+                        # Check if it's in list format: {'interrupts': [list]}
+                        if 'interrupts' in interrupts_data and isinstance(interrupts_data['interrupts'], list):
+                            # Convert list format to dict format for exporter
+                            # Dict format: {interrupt_name: {rate, cpu, per_cpu}}
+                            interrupts_dict = {}
+                            for irq in interrupts_data['interrupts']:
+                                # Use 'name' field as key, fallback to 'irq' if no name
+                                key = irq.get('name', irq.get('irq', 'unknown'))
+                                interrupts_dict[key] = {
+                                    'rate': irq.get('rate', irq.get('total', 0)),  # Use rate if available, else total
+                                    'total': irq.get('total', 0),
+                                    'cpu': irq.get('cpu', -1),
+                                    'per_cpu': irq.get('per_cpu', [])
+                                }
+                            
+                            # Store the converted dict for this timestamp
+                            interrupt_samples.append({
+                                'timestamp_idx': idx,
+                                'interrupts': interrupts_dict
+                            })
+                        else:
+                            # Already in dict format (legacy format)
+                            interrupt_samples.append({
+                                'timestamp_idx': idx,
+                                'interrupts': interrupts_data
+                            })
                 else:
                     tier1_context_switches.append(0)
                     tier1_load_avg_1m.append(0)
@@ -2004,6 +2025,16 @@ class DataExporter:
             },
             'npu': {
                 'usage': npu_usage
+            },
+            'tier1': {
+                'context_switches': tier1_context_switches,
+                'load_avg_1m': tier1_load_avg_1m,
+                'load_avg_5m': tier1_load_avg_5m,
+                'load_avg_15m': tier1_load_avg_15m,
+                'procs_running': tier1_procs_running,
+                'procs_blocked': tier1_procs_blocked,
+                'per_core_irq': tier1_per_core_irq,
+                'per_core_softirq': tier1_per_core_softirq
             }
         }
         
@@ -2018,19 +2049,73 @@ class DataExporter:
             # Build timeseries for each interrupt
             for name in all_interrupt_names:
                 rates = [0] * len(timestamps)  # Initialize with zeros for all timestamps
+                totals = [0] * len(timestamps)  # Store cumulative totals for delta calculation
                 per_cpu_timeseries = []  # Per-CPU distribution over time
                 cpus = []  # Primary CPU affinity
                 
+                # First pass: collect total counts
                 for sample in interrupt_samples:
                     idx = sample['timestamp_idx']
                     if name in sample['interrupts']:
                         irq_data = sample['interrupts'][name]
-                        rates[idx] = irq_data.get('rate', 0)
+                        # Store cumulative total
+                        totals[idx] = irq_data.get('total', 0)
                         if not cpus:  # Store CPU affinity from first occurrence
                             cpus = [irq_data.get('cpu', -1)]
                         # Store per-CPU interrupt distribution
                         if 'per_cpu' in irq_data:
                             per_cpu_timeseries.append(irq_data['per_cpu'])
+                
+                # Second pass: calculate rates (delta between samples)
+                # Rate = (total[i] - total[i-1]) / (time[i] - time[i-1])
+                # CRITICAL: Use timestamp_ms from tier1 data (device time) NOT host time_seconds
+                # Interrupt counts are collected on the device at device time, so we must use
+                # device timestamp for accurate rate calculation
+                
+                # Skip first sample - need at least 2 valid samples to calculate a rate
+                # Start from index 2 to avoid initial spike from cumulative count starting at 0
+                for i in range(2, len(timestamps)):
+                    if totals[i] > 0 and totals[i-1] > 0 and i < len(self.session_data):
+                        # Get timestamp_ms from tier1 data for accurate device-time delta
+                        curr_tier1 = self.session_data[i].get('tier1', {})
+                        prev_tier1 = self.session_data[i-1].get('tier1', {})
+                        
+                        curr_time_ms = curr_tier1.get('timestamp_ms') if isinstance(curr_tier1, dict) else None
+                        prev_time_ms = prev_tier1.get('timestamp_ms') if isinstance(prev_tier1, dict) else None
+                        
+                        # Check if timestamp hasn't changed (duplicate sample from same device data)
+                        if curr_time_ms is not None and prev_time_ms is not None:
+                            if curr_time_ms == prev_time_ms:
+                                # Same device sample logged twice - no time elapsed, rate = 0
+                                # This happens when PC logging interval and device sample interval are out of sync
+                                rates[i] = 0
+                                continue
+                            elif curr_time_ms > prev_time_ms:
+                                # Valid timestamp delta - calculate rate
+                                delta_time = (curr_time_ms - prev_time_ms) / 1000.0
+                            else:
+                                # Timestamp went backwards? Use fallback
+                                delta_time = 1.0
+                        else:
+                            # Fallback: use configured update interval (usually 1 second)
+                            delta_time = 1.0
+                        
+                        # Calculate delta interrupts
+                        delta_interrupts = totals[i] - totals[i-1]
+                        
+                        if delta_time > 0 and delta_interrupts >= 0:
+                            # Calculate interrupts per second
+                            rates[i] = int(delta_interrupts / delta_time)
+                        else:
+                            rates[i] = 0
+                    else:
+                        rates[i] = 0
+                
+                # First two samples: set to 0 (not enough history for accurate rate)
+                # This avoids the huge spike from initial cumulative count
+                rates[0] = 0
+                if len(rates) > 1:
+                    rates[1] = 0
                 
                 interrupt_timeseries[name] = {
                     'rates': rates,

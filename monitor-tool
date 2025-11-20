@@ -2,16 +2,5 @@
 # Launcher script for System Monitor Tool
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-
-# Preserve display environment for GUI
-export DISPLAY="${DISPLAY:-:0}"
-export XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
-
-# Use Wayland if available and preferred
-if [ "$XDG_SESSION_TYPE" = "wayland" ]; then
-    export QT_QPA_PLATFORM=wayland
-fi
-
-# Activate virtual environment and run
 source "$SCRIPT_DIR/venv/bin/activate"
 python "$SCRIPT_DIR/src/main.py" "$@"

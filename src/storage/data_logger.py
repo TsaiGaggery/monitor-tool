@@ -225,12 +225,12 @@ class DataLogger:
                 if tier1_info:
                     ctxt = tier1_info.get('context_switches', 0)
                     
-                    load_avg_data = tier1_info.get('load_average', {})
+                    load_avg_data = tier1_info.get('load_avg', {})
                     load_avg_1m = load_avg_data.get('1min', 0.0)
                     load_avg_5m = load_avg_data.get('5min', 0.0)
                     load_avg_15m = load_avg_data.get('15min', 0.0)
                     
-                    procs_data = tier1_info.get('processes', {})
+                    procs_data = tier1_info.get('process_counts', {})
                     procs_running = procs_data.get('running', 0)
                     procs_blocked = procs_data.get('blocked', 0)
                     

@@ -201,6 +201,34 @@ class LocalDataSource(MonitorDataSource):
         if not self.enable_tier1:
             return {}
         
+        # Warm-up: If this is the very first call, take a baseline sample
+        # so subsequent calls will have meaningful rates (not zero)
+        if not hasattr(self, '_prev_interrupts'):
+            # Initialize baseline by reading interrupts once
+            try:
+                with open('/proc/interrupts', 'r') as f:
+                    lines = f.readlines()
+                    if len(lines) > 1:
+                        header_parts = lines[0].split()
+                        num_cpus = sum(1 for part in header_parts if part.startswith('CPU'))
+                        
+                        self._prev_interrupts = {}
+                        for line in lines[1:]:
+                            parts = line.split()
+                            if len(parts) < num_cpus + 2:
+                                continue
+                            irq_name = parts[0].rstrip(':')
+                            try:
+                                total = sum(int(parts[1 + i]) for i in range(num_cpus))
+                                self._prev_interrupts[irq_name] = total
+                            except (ValueError, IndexError):
+                                continue
+                        
+                        self._prev_interrupts_time_ms = int(__import__('time').time() * 1000)
+            except Exception:
+                self._prev_interrupts = {}
+                self._prev_interrupts_time_ms = int(__import__('time').time() * 1000)
+        
         import psutil
         
         # Get CPU stats (context switches, interrupts)
@@ -292,8 +320,39 @@ class LocalDataSource(MonitorDataSource):
                         except (ValueError, IndexError):
                             continue
                     
-                    # Sort by total count and get top 10
-                    interrupt_data.sort(key=lambda x: x['total'], reverse=True)
+                    # Calculate rates (interrupts per second) from delta
+                    # Create a dictionary for quick lookup of previous values
+                    if not hasattr(self, '_prev_interrupts'):
+                        self._prev_interrupts = {}
+                        self._prev_interrupts_time_ms = int(time.time() * 1000)
+                    
+                    current_time_ms = int(time.time() * 1000)
+                    time_delta_sec = (current_time_ms - self._prev_interrupts_time_ms) / 1000.0
+                    
+                    # Calculate rate for each interrupt
+                    for irq_data in interrupt_data:
+                        irq_key = irq_data['irq']
+                        curr_total = irq_data['total']
+                        
+                        if irq_key in self._prev_interrupts and time_delta_sec > 0:
+                            prev_total = self._prev_interrupts[irq_key]
+                            delta = curr_total - prev_total
+                            if delta >= 0:
+                                irq_data['rate'] = int(delta / time_delta_sec)
+                            else:
+                                irq_data['rate'] = 0
+                        else:
+                            # First sample or counter wrapped - no rate available
+                            irq_data['rate'] = 0
+                        
+                        # Update previous value
+                        self._prev_interrupts[irq_key] = curr_total
+                    
+                    # Update timestamp for next delta calculation
+                    self._prev_interrupts_time_ms = current_time_ms
+                    
+                    # Sort by RATE (current activity) not total (cumulative since boot)
+                    interrupt_data.sort(key=lambda x: x.get('rate', 0), reverse=True)
                     top_interrupts = interrupt_data[:10]
                     
                     # Format as JSON with structure matching SSH format
@@ -303,6 +362,7 @@ class LocalDataSource(MonitorDataSource):
                                 'name': irq['description'][:50] if irq['description'] else irq['irq'],  # Truncate long names
                                 'irq': irq['irq'],
                                 'total': irq['total'],
+                                'rate': irq.get('rate', 0),  # Include rate for CLI display
                                 'cpu': irq['primary_cpu'],
                                 'per_cpu': irq['per_cpu']
                             }
@@ -315,18 +375,21 @@ class LocalDataSource(MonitorDataSource):
         
         tier1_data = {
             'context_switches': stats.get('ctx_switches', 0),
-            'load_average': {
+            'load_avg': {
                 '1min': load_avg[0] if len(load_avg) > 0 else 0,
                 '5min': load_avg[1] if len(load_avg) > 1 else 0,
                 '15min': load_avg[2] if len(load_avg) > 2 else 0
             },
-            'processes': {
+            'process_counts': {
                 'running': procs_running,
-                'blocked': procs_blocked
+                'blocked': procs_blocked,
+                'total': len(psutil.pids())
             },
             'per_core_irq_pct': per_core_irq_pct,
             'per_core_softirq_pct': per_core_softirq_pct,
-            'interrupts': interrupts
+            'interrupts': interrupts,
+            # Include timestamp_ms for consistency (local uses host time in milliseconds)
+            'timestamp_ms': int(time.time() * 1000)
         }
         
         return tier1_data
@@ -486,6 +549,122 @@ class AndroidDataSource(MonitorDataSource):
             'partition_usage': partitions_list
         }
     
+    def get_tier1_info(self) -> Dict:
+        """Get Tier 1 metrics from Android device.
+        
+        Returns:
+            Dictionary containing tier1 metrics including context switches,
+            load average, process counts, and interrupts
+        """
+        if not self.is_connected() or not self.enable_tier1:
+            return {}
+        
+        # Warm-up: Initialize baseline on first call for meaningful rates
+        if not hasattr(self, '_prev_android_interrupts'):
+            raw_data_init = self.adb_monitor.get_latest_data()
+            if raw_data_init:
+                self._prev_android_interrupts = {}
+                interrupt_data = raw_data_init.get('interrupt_data')
+                if interrupt_data and isinstance(interrupt_data, dict):
+                    irq_list = interrupt_data.get('interrupts', [])
+                    for irq in irq_list:
+                        irq_key = irq.get('irq', '') or irq.get('name', '')
+                        self._prev_android_interrupts[irq_key] = irq.get('total', 0)
+                self._prev_ctxt = raw_data_init.get('ctxt', 0)
+                self._prev_ctxt_timestamp_ms = raw_data_init.get('timestamp_ms', 0)
+                
+                # Wait for next update cycle to get fresh data (device script updates every 1 sec)
+                import time
+                time.sleep(1.2)  # Wait for next sample to ensure we get fresh data
+        
+        # Get raw data from Android monitor
+        raw_data = self.adb_monitor.get_latest_data()
+        if not raw_data:
+            return {}
+        
+        # Calculate context switches per second (need delta from previous sample)
+        ctxt = raw_data.get('ctxt', 0)
+        timestamp_ms = raw_data.get('timestamp_ms', 0)
+        
+        # Store previous timestamp BEFORE updating (for interrupt rate calculation)
+        prev_timestamp_for_irq = self._prev_ctxt_timestamp_ms if hasattr(self, '_prev_ctxt_timestamp_ms') else timestamp_ms
+        
+        ctx_switches_per_sec = 0
+        if hasattr(self, '_prev_ctxt') and hasattr(self, '_prev_ctxt_timestamp_ms'):
+            delta_ctxt = ctxt - self._prev_ctxt
+            delta_time_ms = timestamp_ms - self._prev_ctxt_timestamp_ms
+            if delta_time_ms > 0 and delta_ctxt > 0:
+                ctx_switches_per_sec = int((delta_ctxt * 1000.0) / delta_time_ms)
+        
+        self._prev_ctxt = ctxt
+        self._prev_ctxt_timestamp_ms = timestamp_ms
+        
+        # Build tier1 data structure
+        tier1_data = {
+            'context_switches': ctx_switches_per_sec,
+            'load_avg': {
+                '1min': raw_data.get('load_avg_1m', 0),
+                '5min': raw_data.get('load_avg_5m', 0),
+                '15min': raw_data.get('load_avg_15m', 0)
+            },
+            'process_counts': {
+                'running': raw_data.get('procs_running', 0),
+                'blocked': raw_data.get('procs_blocked', 0),
+                'total': 0  # Not available from Android monitoring
+            }
+        }
+        
+        # Add interrupt data if available and calculate rates
+        interrupt_data = raw_data.get('interrupt_data')
+        if interrupt_data and isinstance(interrupt_data, dict) and 'interrupts' in interrupt_data:
+            # Calculate rates (interrupts per second) from delta
+            if not hasattr(self, '_prev_android_interrupts'):
+                self._prev_android_interrupts = {}
+            
+            irq_list = interrupt_data.get('interrupts', [])
+            
+            # Calculate rate for each interrupt
+            for irq in irq_list:
+                irq_key = irq.get('irq', '') or irq.get('name', '')
+                curr_total = irq.get('total', 0)
+                
+                if irq_key in self._prev_android_interrupts and timestamp_ms > prev_timestamp_for_irq:
+                    prev_total = self._prev_android_interrupts[irq_key]
+                    delta = curr_total - prev_total
+                    delta_time_ms = timestamp_ms - prev_timestamp_for_irq
+                    if delta >= 0 and delta_time_ms > 0:
+                        irq['rate'] = int((delta * 1000.0) / delta_time_ms)
+                    else:
+                        irq['rate'] = 0
+                else:
+                    # First sample - no rate available
+                    irq['rate'] = 0
+                
+                # Update previous value
+                self._prev_android_interrupts[irq_key] = curr_total
+            
+            # Sort by RATE (current activity) not total (cumulative)
+            irq_list.sort(key=lambda x: x.get('rate', 0), reverse=True)
+            
+            # Update the interrupt data with sorted list
+            interrupt_data['interrupts'] = irq_list
+            tier1_data['interrupts'] = interrupt_data
+        
+        # Add per-core IRQ/softirq percentages if available
+        per_core_irq = raw_data.get('per_core_irq_pct')
+        per_core_softirq = raw_data.get('per_core_softirq_pct')
+        if per_core_irq:
+            tier1_data['per_core_irq_pct'] = per_core_irq
+        if per_core_softirq:
+            tier1_data['per_core_softirq_pct'] = per_core_softirq
+        
+        # Include device timestamp_ms for accurate rate calculation in exporter
+        # CRITICAL: Interrupt counts are collected on device time, so we must use
+        # device timestamp_ms (not host time_seconds) for rate calculations
+        tier1_data['timestamp_ms'] = timestamp_ms
+        
+        return tier1_data
+    
     def get_timestamp_ms(self) -> int:
         """Get Android device timestamp in milliseconds."""
         if not self.is_connected():
@@ -590,6 +769,7 @@ class RemoteLinuxDataSource(MonitorDataSource):
         self._prev_cpu_raw = None
         self._prev_per_core_raw = None
         self._prev_cpu_time = None  # Separate timestamp for CPU
+        self._prev_cpu_power_uj = None  # Previous CPU energy counter
         self._prev_net_bytes = None
         self._prev_net_time = None  # Separate timestamp for network
         self._prev_disk_sectors = None
@@ -659,7 +839,18 @@ class RemoteLinuxDataSource(MonitorDataSource):
         per_core_raw = raw_data.get('per_core_raw', [])
         per_core_freq = raw_data.get('per_core_freq_khz', [])
         cpu_temp = raw_data.get('cpu_temp_millideg', 0)
+        cpu_power_uj = raw_data.get('cpu_power_uj', 0)
         timestamp_ms = raw_data.get('timestamp_ms', 0)
+        
+        # Calculate CPU Power (Watts)
+        power_watts = 0.0
+        if self._prev_cpu_power_uj is not None and self._prev_cpu_time is not None:
+            time_delta = (timestamp_ms - self._prev_cpu_time) / 1000.0
+            if time_delta > 0 and cpu_power_uj > self._prev_cpu_power_uj:
+                energy_delta = cpu_power_uj - self._prev_cpu_power_uj
+                power_watts = (energy_delta / 1_000_000.0) / time_delta
+        
+        self._prev_cpu_power_uj = cpu_power_uj
         
         # Calculate CPU usage (using remote device timestamp)
         cpu_usage = self._calculate_cpu_usage(cpu_raw, per_core_raw, timestamp_ms)
@@ -691,6 +882,7 @@ class RemoteLinuxDataSource(MonitorDataSource):
                 'per_core': freq_list
             },
             'temperature': temp_sensors,
+            'power_watts': power_watts,
             'monitor_cpu_usage': monitor_cpu_usage
         }
     
@@ -956,6 +1148,119 @@ class RemoteLinuxDataSource(MonitorDataSource):
             },
             'partition_usage': []
         }
+    
+    def get_tier1_info(self) -> Dict:
+        """Get Tier 1 metrics from remote Linux system.
+        
+        Returns:
+            Dictionary containing tier1 metrics including context switches,
+            load average, process counts, and interrupts
+        """
+        if not self.is_connected() or not self.enable_tier1:
+            return {}
+        
+        # Warm-up: Initialize baseline on first call for meaningful rates
+        if not hasattr(self, '_prev_ssh_interrupts'):
+            raw_data_init = self.ssh_monitor.get_latest_data()
+            if raw_data_init:
+                self._prev_ssh_interrupts = {}
+                interrupt_data = raw_data_init.get('interrupt_data')
+                if interrupt_data and isinstance(interrupt_data, dict):
+                    irq_list = interrupt_data.get('interrupts', [])
+                    for irq in irq_list:
+                        irq_key = irq.get('irq', '') or irq.get('name', '')
+                        self._prev_ssh_interrupts[irq_key] = irq.get('total', 0)
+                self._prev_ssh_ctxt = raw_data_init.get('ctxt', 0)
+                self._prev_ssh_ctxt_timestamp_ms = raw_data_init.get('timestamp_ms', 0)
+                
+                # Wait for next update cycle to get fresh data (remote script updates every 1 sec)
+                import time
+                time.sleep(1.2)  # Wait for next sample to ensure we get fresh data
+        
+        # Get raw data from SSH monitor
+        raw_data = self.ssh_monitor.get_latest_data()
+        if not raw_data:
+            return {}
+        
+        # Calculate context switches per second (need delta from previous sample)
+        ctxt = raw_data.get('ctxt', 0)
+        timestamp_ms = raw_data.get('timestamp_ms', 0)
+        
+        ctx_switches_per_sec = 0
+        if hasattr(self, '_prev_ssh_ctxt') and hasattr(self, '_prev_ssh_ctxt_timestamp_ms'):
+            delta_ctxt = ctxt - self._prev_ssh_ctxt
+            delta_time_ms = timestamp_ms - self._prev_ssh_ctxt_timestamp_ms
+            if delta_time_ms > 0 and delta_ctxt > 0:
+                ctx_switches_per_sec = int((delta_ctxt * 1000.0) / delta_time_ms)
+        
+        self._prev_ssh_ctxt = ctxt
+        self._prev_ssh_ctxt_timestamp_ms = timestamp_ms
+        
+        # Build tier1 data structure
+        tier1_data = {
+            'context_switches': ctx_switches_per_sec,
+            'load_avg': {
+                '1min': raw_data.get('load_avg_1m', 0),
+                '5min': raw_data.get('load_avg_5m', 0),
+                '15min': raw_data.get('load_avg_15m', 0)
+            },
+            'process_counts': {
+                'running': raw_data.get('procs_running', 0),
+                'blocked': raw_data.get('procs_blocked', 0),
+                'total': 0  # Not available from remote monitoring
+            }
+        }
+        
+        # Add interrupt data if available and calculate rates
+        interrupt_data = raw_data.get('interrupt_data')
+        if interrupt_data and isinstance(interrupt_data, dict) and 'interrupts' in interrupt_data:
+            # Calculate rates (interrupts per second) from delta
+            if not hasattr(self, '_prev_ssh_interrupts'):
+                self._prev_ssh_interrupts = {}
+            
+            irq_list = interrupt_data.get('interrupts', [])
+            
+            # Calculate rate for each interrupt
+            for irq in irq_list:
+                irq_key = irq.get('irq', '') or irq.get('name', '')
+                curr_total = irq.get('total', 0)
+                
+                if irq_key in self._prev_ssh_interrupts and timestamp_ms > self._prev_ssh_ctxt_timestamp_ms:
+                    prev_total = self._prev_ssh_interrupts[irq_key]
+                    delta = curr_total - prev_total
+                    delta_time_ms = timestamp_ms - self._prev_ssh_ctxt_timestamp_ms
+                    if delta >= 0 and delta_time_ms > 0:
+                        irq['rate'] = int((delta * 1000.0) / delta_time_ms)
+                    else:
+                        irq['rate'] = 0
+                else:
+                    # First sample - no rate available
+                    irq['rate'] = 0
+                
+                # Update previous value
+                self._prev_ssh_interrupts[irq_key] = curr_total
+            
+            # Sort by RATE (current activity) not total (cumulative)
+            irq_list.sort(key=lambda x: x.get('rate', 0), reverse=True)
+            
+            # Update the interrupt data with sorted list
+            interrupt_data['interrupts'] = irq_list
+            tier1_data['interrupts'] = interrupt_data
+        
+        # Add per-core IRQ/softirq percentages if available
+        per_core_irq = raw_data.get('per_core_irq_pct')
+        per_core_softirq = raw_data.get('per_core_softirq_pct')
+        if per_core_irq:
+            tier1_data['per_core_irq_pct'] = per_core_irq
+        if per_core_softirq:
+            tier1_data['per_core_softirq_pct'] = per_core_softirq
+        
+        # Include device timestamp_ms for accurate rate calculation in exporter
+        # CRITICAL: Interrupt counts are collected on remote device time, so we must use
+        # remote timestamp_ms (not host time_seconds) for rate calculations
+        tier1_data['timestamp_ms'] = timestamp_ms
+        
+        return tier1_data
     
     def get_source_name(self) -> str:
         """Get data source name."""

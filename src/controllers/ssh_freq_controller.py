@@ -10,17 +10,21 @@ import paramiko
 class SSHFrequencyController:
     """Control CPU/GPU frequencies on remote Linux system via SSH."""
     
-    def __init__(self, host: str, port: int = 22, user: str = None):
+    def __init__(self, host: str, port: int = 22, user: str = None, password: str = None, key_path: str = None):
         """Initialize SSH frequency controller.
         
         Args:
             host: Remote host IP or hostname
             port: SSH port (default: 22)
             user: SSH username (default: current user)
+            password: SSH password (optional)
+            key_path: Path to SSH private key (optional)
         """
         self.host = host
         self.port = port
         self.user = user or os.getenv('USER', 'user')
+        self.password = password
+        self.key_path = key_path
         self.remote_id = f"{self.user}@{self.host}"
         
         # Path to the controller script (will be uploaded to remote)
@@ -40,6 +44,42 @@ class SSHFrequencyController:
     
     def _upload_script(self):
         """Upload frequency controller script to remote system."""
+        # Use paramiko if password or key is provided
+        if self.password or self.key_path:
+            try:
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                
+                connect_kwargs = {
+                    'hostname': self.host,
+                    'port': self.port,
+                    'username': self.user,
+                    'timeout': 10,
+                    'allow_agent': False,
+                    'look_for_keys': False
+                }
+                
+                if self.password:
+                    connect_kwargs['password'] = self.password
+                
+                if self.key_path:
+                    connect_kwargs['key_filename'] = self.key_path
+                
+                client.connect(**connect_kwargs)
+                
+                sftp = client.open_sftp()
+                sftp.put(self.local_script_path, self.remote_script_path)
+                sftp.close()
+                client.close()
+                
+                # Make it executable
+                self._run_ssh_command("chmod +x " + self.remote_script_path, timeout=2)
+                return
+                
+            except Exception as e:
+                print(f"⚠️  Error uploading script (paramiko): {e}")
+                return
+
         try:
             # Upload script to /tmp
             result = subprocess.run(
@@ -78,7 +118,9 @@ class SSHFrequencyController:
             
             if result and result not in ["", "ERROR:", "N/A"]:
                 # Check if we have passwordless sudo for frequency control
-                self.has_sudo = self.check_has_passwordless_sudo(self.host, self.port, self.user)
+                self.has_sudo = self.check_has_passwordless_sudo(
+                    self.host, self.port, self.user, self.password, self.key_path
+                )
                 
                 # Script works, mark as available
                 self.is_available = True
@@ -124,6 +166,38 @@ class SSHFrequencyController:
         Returns:
             Command output or None if failed
         """
+        # Use paramiko if password or key is provided
+        if self.password or self.key_path:
+            try:
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                
+                connect_kwargs = {
+                    'hostname': self.host,
+                    'port': self.port,
+                    'username': self.user,
+                    'timeout': timeout,
+                    'allow_agent': False,
+                    'look_for_keys': False
+                }
+                
+                if self.password:
+                    connect_kwargs['password'] = self.password
+                
+                if self.key_path:
+                    connect_kwargs['key_filename'] = self.key_path
+                
+                client.connect(**connect_kwargs)
+                
+                stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+                output = stdout.read().decode('utf-8').strip()
+                client.close()
+                return output
+                
+            except Exception as e:
+                print(f"⚠️  Error running SSH command (paramiko): {e}")
+                return None
+
         try:
             result = subprocess.run(
                 ["ssh", "-p", str(self.port), 
@@ -347,7 +421,8 @@ class SSHFrequencyController:
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             
             try:
-                client.connect(host, port=port, username=user, password=password, timeout=10)
+                client.connect(host, port=port, username=user, password=password, timeout=10, 
+                             allow_agent=False, look_for_keys=False)
             except paramiko.AuthenticationException:
                 return False, "Authentication failed. Please check your password."
             except Exception as e:
@@ -492,18 +567,96 @@ class SSHFrequencyController:
             return False, f"Unexpected error: {e}"
     
     @staticmethod
-    def check_has_passwordless_sudo(host: str, port: int, user: str) -> bool:
+    def check_has_passwordless_sudo(host: str, port: int, user: str, password: str = None, key_path: str = None) -> bool:
         """Check if passwordless sudo is already configured.
         
         Args:
             host: Remote host IP or hostname
             port: SSH port
             user: SSH username
+            password: SSH password (optional)
+            key_path: Path to SSH private key (optional)
             
         Returns:
             True if passwordless sudo is available for frequency control
         """
         try:
+            # Use paramiko if password or key is provided
+            if password or key_path:
+                try:
+                    client = paramiko.SSHClient()
+                    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                    
+                    connect_kwargs = {
+                        'hostname': host,
+                        'port': port,
+                        'username': user,
+                        'timeout': 5,
+                        'allow_agent': False,
+                        'look_for_keys': False
+                    }
+                    
+                    if password:
+                        connect_kwargs['password'] = password
+                    
+                    if key_path:
+                        connect_kwargs['key_filename'] = key_path
+                    
+                    client.connect(**connect_kwargs)
+                    
+                    # 1. Read current governor
+                    stdin, stdout, stderr = client.exec_command("cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null")
+                    original_governor = stdout.read().decode('utf-8').strip()
+                    
+                    if not original_governor:
+                        client.close()
+                        return False
+                    
+                    # 2. Get available governors
+                    stdin, stdout, stderr = client.exec_command("cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors 2>/dev/null")
+                    available_governors = stdout.read().decode('utf-8').strip().split()
+                    
+                    if len(available_governors) < 2:
+                        # Only one governor, can't really test switching
+                        # Fallback: try to write same value back
+                        test_cmd = f"echo '{original_governor}' | sudo -n tee /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor > /dev/null 2>&1"
+                        stdin, stdout, stderr = client.exec_command(test_cmd)
+                        exit_code = stdout.channel.recv_exit_status()
+                        client.close()
+                        return exit_code == 0
+                    
+                    # 3. Pick a different governor to test
+                    test_governor = None
+                    for gov in available_governors:
+                        if gov != original_governor:
+                            test_governor = gov
+                            break
+                    
+                    if not test_governor:
+                        client.close()
+                        return False
+                    
+                    # 4. Try to change to test governor (using sudo -n)
+                    test_cmd = f"echo '{test_governor}' | sudo -n tee /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor > /dev/null 2>&1"
+                    stdin, stdout, stderr = client.exec_command(test_cmd)
+                    exit_code = stdout.channel.recv_exit_status()
+                    
+                    if exit_code != 0:
+                        client.close()
+                        return False
+                    
+                    # 5. Restore original governor
+                    restore_cmd = f"echo '{original_governor}' | sudo -n tee /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor > /dev/null 2>&1"
+                    client.exec_command(restore_cmd)
+                    
+                    client.close()
+                    return True
+                    
+                except Exception as e:
+                    print(f"⚠️  Error checking sudo (paramiko): {e}")
+                    return False
+
+            # Fallback to subprocess if no password/key provided (assumes ssh agent or passwordless ssh)
             # 1. Read current governor
             result = subprocess.run(
                 ["ssh", "-p", str(port), 

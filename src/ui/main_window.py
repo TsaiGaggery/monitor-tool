@@ -11,6 +11,7 @@ from PyQt5.QtGui import QFont
 from data_source import MonitorDataSource, LocalDataSource, AndroidDataSource, RemoteLinuxDataSource
 from controllers import FrequencyController, ADBFrequencyController, SSHFrequencyController
 from storage import DataLogger, DataExporter
+from monitoring_snapshot import MonitoringSnapshot
 from ui.widgets.plot_widget import MonitorPlotWidget, MultiLinePlotWidget
 from ui.widgets.control_panel import ControlPanel
 from ui.widgets.info_card import InfoCard
@@ -69,7 +70,9 @@ class MainWindow(QMainWindow):
             ssh_freq_ctrl = SSHFrequencyController(
                 host=self.data_source.ssh_monitor.host,
                 port=self.data_source.ssh_monitor.port,
-                user=self.data_source.ssh_monitor.user
+                user=self.data_source.ssh_monitor.user,
+                password=self.data_source.ssh_monitor.password,
+                key_path=self.data_source.ssh_monitor.key_path
             )
             
             # Only use if available (cpufreq support)
@@ -554,8 +557,11 @@ class MainWindow(QMainWindow):
         # Get current time
         current_time = time.time() - self.start_time
         
+        # Create snapshot from data source (standardizes field names)
+        snapshot = MonitoringSnapshot.from_data_source(self.data_source)
+        
         # CPU data
-        cpu_info = self.data_source.get_cpu_info()
+        cpu_info = snapshot.cpu
         cpu_usage = cpu_info['usage']['total']
         cpu_freq = cpu_info['frequency']['average']
         
@@ -586,7 +592,7 @@ class MainWindow(QMainWindow):
             self.cpu_governor_label.setText(f"Governor: N/A (Android)")
         
         # Memory data
-        memory_info = self.data_source.get_memory_info()
+        memory_info = snapshot.memory
         mem = memory_info['memory']
         swap = memory_info['swap']
         
@@ -598,7 +604,7 @@ class MainWindow(QMainWindow):
         self.swap_label.setText(f"{swap['used']:.1f} / {swap['total']:.1f} GB")
         
         # GPU data
-        gpu_info = self.data_source.get_gpu_info()
+        gpu_info = snapshot.gpu
         if gpu_info.get('available'):
             gpus = gpu_info['gpus']
             if gpus:
@@ -631,7 +637,7 @@ class MainWindow(QMainWindow):
                     self.gpu_usage_plot.update_data(gpu_util, gpu_freq, current_time)
         
         # NPU data
-        npu_info = self.data_source.get_npu_info()
+        npu_info = snapshot.npu
         if npu_info.get('available'):
             util = npu_info.get('utilization', 0)
             freq = npu_info.get('frequency', 0)
@@ -645,7 +651,7 @@ class MainWindow(QMainWindow):
                 self.npu_usage_plot.update_data(util, freq, current_time)
         
         # Network data
-        network_info = self.data_source.get_network_info()
+        network_info = snapshot.network
         upload_speed_bytes = network_info.get('upload_speed', 0)  # bytes/sec
         download_speed_bytes = network_info.get('download_speed', 0)  # bytes/sec
         connections = network_info.get('connections', {'total': 0, 'tcp_established': 0})
@@ -676,7 +682,7 @@ class MainWindow(QMainWindow):
         )
         
         # Disk data
-        disk_info = self.data_source.get_disk_info()
+        disk_info = snapshot.disk
         read_speed_mb = disk_info.get('read_speed_mb', 0)
         write_speed_mb = disk_info.get('write_speed_mb', 0)
         root_usage = disk_info.get('partitions', {}).get('/', {})
@@ -763,33 +769,19 @@ class MainWindow(QMainWindow):
         self.network_speed_plot.update_data(upload_speed_kb, download_speed_kb, current_time)
         self.disk_io_plot.update_data(read_speed_mb, write_speed_mb, current_time)
         
+        # Get tier1 info from snapshot (standardized field names)
+        tier1_info = snapshot.tier1
+        
         # Log data to database (only for local monitoring)
         if self.data_logger:
-            # Get tier1 info if available
-            tier1_info = None
-            if hasattr(self.data_source, 'get_tier1_info'):
-                tier1_info = self.data_source.get_tier1_info()
-            
             self.data_logger.log_data(cpu_info, memory_info, gpu_info, 
                                       npu_info if npu_info.get('available', False) else None,
                                       network_info, disk_info, tier1_info)
         
-        # Add data to exporter (only when we have a new remote timestamp)
-        export_data = {
-            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
-            'time_seconds': current_time,
-            'cpu': cpu_info,
-            'memory': memory_info,
-            'gpu': gpu_info,
-            'network': network_info,
-            'disk': disk_info
-        }
-        
-        # Add tier1 data if available (for local mode)
-        if hasattr(self.data_source, 'get_tier1_info'):
-            tier1_info = self.data_source.get_tier1_info()
-            if tier1_info:
-                export_data['tier1'] = tier1_info
+        # Use snapshot dict for export (includes standardized tier1 field names)
+        export_data = snapshot.to_dict()
+        export_data['timestamp'] = time.strftime('%Y-%m-%d %H:%M:%S')
+        export_data['time_seconds'] = current_time
         
         # Add UTC timestamp from device (Android/SSH) if available
         should_add_sample = True

@@ -90,20 +90,58 @@ get_per_core_freq() {
 
 # Get CPU temperature (millidegrees)
 get_cpu_temp_raw() {
-    # Try TCPU (actual CPU temp) first
-    if [ -f /sys/class/thermal/thermal_zone5/temp ]; then
-        cat /sys/class/thermal/thermal_zone5/temp
-    # Try x86_pkg_temp (package temp)
-    elif [ -f /sys/class/thermal/thermal_zone7/temp ]; then
-        cat /sys/class/thermal/thermal_zone7/temp
-    # Fallback to zone0 (generic)
-    elif [ -f /sys/class/thermal/thermal_zone0/temp ]; then
-        cat /sys/class/thermal/thermal_zone0/temp
-    elif [ -f /sys/class/hwmon/hwmon0/temp1_input ]; then
-        cat /sys/class/hwmon/hwmon0/temp1_input
-    else
-        echo "0"
+    # 1. Search for specific CPU thermal zones by type
+    for zone in /sys/class/thermal/thermal_zone*; do
+        if [ -f "$zone/type" ]; then
+            type=$(cat "$zone/type" 2>/dev/null)
+            
+            # Check for Intel package temp
+            if [ "$type" = "x86_pkg_temp" ]; then
+                temp=$(cat "$zone/temp" 2>/dev/null)
+                if [ "$temp" -gt 1000 ]; then
+                    echo "$temp"
+                    return
+                fi
+            fi
+        fi
+    done
+    
+    # 2. Search for generic CPU thermal zones
+    for zone in /sys/class/thermal/thermal_zone*; do
+        if [ -f "$zone/type" ]; then
+            type=$(cat "$zone/type" 2>/dev/null)
+            
+            # Check for common CPU thermal names
+            case "$type" in
+                *cpu*|*CPU*|*tsens_tz_sensor*|*mtktscpu*|*exynos-therm*)
+                    if [ -f "$zone/temp" ]; then
+                        temp=$(cat "$zone/temp" 2>/dev/null)
+                        if [ "$temp" -gt 1000 ]; then
+                            echo "$temp"
+                            return
+                        fi
+                    fi
+                    ;;
+            esac
+        fi
+    done
+
+    # 3. Fallback to zone0
+    if [ -f /sys/class/thermal/thermal_zone0/temp ]; then
+        temp=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
+        if [ "$temp" -gt 1000 ]; then
+            echo "$temp"
+            return
+        fi
     fi
+
+    # 4. Fallback to hwmon
+    if [ -f /sys/class/hwmon/hwmon0/temp1_input ]; then
+        cat /sys/class/hwmon/hwmon0/temp1_input
+        return
+    fi
+
+    echo "0"
 }
 
 # Get CPU power consumption (Intel RAPL on x86 Android)

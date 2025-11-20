@@ -34,6 +34,10 @@ $CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/cat /sys/kernel/debug/npu/*
 # Allow monitor-tool to control NPU frequencies without password (if writeable in future)
 $CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/tee /sys/class/accel/accel*/device/npu_*
 $CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/tee /sys/class/devfreq/*/npu/*
+# Allow monitor-tool to read CPU power consumption (RAPL/AMD) without password
+$CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/cat /sys/class/powercap/intel-rapl/intel-rapl*/energy_uj
+$CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/cat /sys/class/powercap/intel-rapl-mmio/intel-rapl-mmio*/energy_uj
+$CURRENT_USER ALL=(ALL) NOPASSWD: /usr/bin/cat /sys/class/hwmon/hwmon*/energy*_input
 EOFCFG"
 
 # Fix the variable substitution

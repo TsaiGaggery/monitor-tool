@@ -4,7 +4,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MONITOR_SCRIPT="$SCRIPT_DIR/android_monitor.sh"
+MONITOR_SCRIPT="$SCRIPT_DIR/android_monitor_raw.sh"
 DEVICE_PATH="/data/local/tmp/android_monitor.sh"
 
 echo "========================================="

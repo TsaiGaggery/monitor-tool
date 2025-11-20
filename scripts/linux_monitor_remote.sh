@@ -32,6 +32,7 @@ init_database() {
         "    per_core_raw TEXT," \
         "    per_core_freq_khz TEXT," \
         "    cpu_temp_millideg INTEGER," \
+        "    cpu_power_uj INTEGER," \
         "    mem_total_kb INTEGER," \
         "    mem_free_kb INTEGER," \
         "    mem_available_kb INTEGER," \
@@ -59,6 +60,9 @@ init_database() {
         ");" \
         "CREATE INDEX IF NOT EXISTS idx_timestamp ON monitoring_data(timestamp);" \
         | sqlite3 "$DB_PATH"
+        
+    # Attempt to add cpu_power_uj column if it doesn't exist (for existing DBs)
+    sqlite3 "$DB_PATH" "ALTER TABLE monitoring_data ADD COLUMN cpu_power_uj INTEGER DEFAULT 0;" 2>/dev/null || true
 }
 
 # Get raw CPU stats from /proc/stat
@@ -89,7 +93,24 @@ get_per_core_freq() {
 
 # Get CPU temperature (millidegrees)
 get_cpu_temp_raw() {
-    # Try different thermal zones
+    # 1. Priority: Check for x86_pkg_temp (Intel CPU package temp)
+    for type_file in /sys/class/thermal/thermal_zone*/type; do
+        if [ -f "$type_file" ]; then
+            type_name=$(cat "$type_file" 2>/dev/null)
+            if [[ "$type_name" == "x86_pkg_temp" ]]; then
+                zone_dir=$(dirname "$type_file")
+                if [ -f "$zone_dir/temp" ]; then
+                    temp=$(cat "$zone_dir/temp" 2>/dev/null || echo "0")
+                    if [ "$temp" -gt 1000 ]; then
+                        echo "$temp"
+                        return
+                    fi
+                fi
+            fi
+        fi
+    done
+
+    # 2. Fallback: Try different thermal zones
     for zone in /sys/class/thermal/thermal_zone*/temp; do
         if [ -f "$zone" ]; then
             temp=$(cat "$zone" 2>/dev/null || echo "0")
@@ -99,6 +120,80 @@ get_cpu_temp_raw() {
             fi
         fi
     done
+    echo "0"
+}
+
+# Get CPU power consumption (microjoules)
+# Uses Intel RAPL or AMD Energy if available
+get_cpu_power_uj() {
+    # Function to try reading a file with various methods
+    try_read() {
+        local file=$1
+        local val=""
+        
+        # 1. Try direct read
+        if [ -r "$file" ]; then
+            val=$(cat "$file" 2>/dev/null)
+        fi
+        
+        # 2. Try sudo if direct read failed or returned empty
+        if [ -z "$val" ] && command -v sudo >/dev/null; then
+            # Try sudo cat directly (don't check sudo -n true, as we might only have specific NOPASSWD rights)
+            val=$(sudo -n cat "$file" 2>/dev/null)
+        fi
+        
+        # 3. Return value if valid number
+        if [ -n "$val" ] && [ "$val" -eq "$val" ] 2>/dev/null; then
+            echo "$val"
+            return 0
+        fi
+        return 1
+    }
+
+    # 1. Search for Intel RAPL (powercap)
+    # Iterate through all intel-rapl folders
+    for dir in /sys/class/powercap/intel-rapl/intel-rapl:*; do
+        # Check if it's a package domain (CPU package)
+        if [ -f "$dir/name" ]; then
+            name=$(cat "$dir/name" 2>/dev/null)
+            if [[ "$name" == *"package"* ]]; then
+                if [ -f "$dir/energy_uj" ]; then
+                    if try_read "$dir/energy_uj"; then return; fi
+                fi
+            fi
+        fi
+    done
+    
+    # 1b. Search for Intel RAPL MMIO (newer Intel CPUs)
+    for dir in /sys/class/powercap/intel-rapl-mmio/intel-rapl-mmio:*; do
+        if [ -f "$dir/name" ]; then
+            name=$(cat "$dir/name" 2>/dev/null)
+            if [[ "$name" == *"package"* ]]; then
+                if [ -f "$dir/energy_uj" ]; then
+                    if try_read "$dir/energy_uj"; then return; fi
+                fi
+            fi
+        fi
+    done
+    
+    # Fallback: Check specific common paths if search failed
+    if [ -f "/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj" ]; then
+        if try_read "/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj"; then return; fi
+    fi
+
+    # 2. Search for AMD Energy (hwmon)
+    for hwmon in /sys/class/hwmon/hwmon*; do
+        if [ -f "$hwmon/name" ]; then
+            name=$(cat "$hwmon/name" 2>/dev/null)
+            if [[ "$name" == "amd_energy" ]]; then
+                # Try energy1_input (usually package)
+                if [ -f "$hwmon/energy1_input" ]; then
+                    if try_read "$hwmon/energy1_input"; then return; fi
+                fi
+            fi
+        fi
+    done
+
     echo "0"
 }
 
@@ -532,6 +627,7 @@ main() {
         per_core_stats=$(get_per_core_raw)
         per_core_freq=$(get_per_core_freq)
         cpu_temp=$(get_cpu_temp_raw)
+        cpu_power_uj=$(get_cpu_power_uj)
         
         read mem_total mem_free mem_available <<< $(get_memory_raw)
         
@@ -578,17 +674,17 @@ main() {
         # Log every write attempt so we can trace timestamps
         echo "[$(date '+%F %T')] INSERT timestamp=$TIMESTAMP runtime_ms=$gpu_runtime mem_used=$gpu_mem_used" >> /tmp/monitor_db_writes.log
         # Check for errors and log to file for debugging
-        if ! sqlite3 "$DB_PATH" "INSERT INTO monitoring_data (timestamp, timestamp_ms, cpu_user, cpu_nice, cpu_sys, cpu_idle, cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz, cpu_temp_millideg, mem_total_kb, mem_free_kb, mem_available_kb, gpu_driver, gpu_freq_mhz, gpu_runtime_ms, gpu_memory_used_bytes, gpu_memory_total_bytes, npu_info, net_rx_bytes, net_tx_bytes, disk_read_sectors, disk_write_sectors, ctxt, load_avg_1m, load_avg_5m, load_avg_15m, procs_running, procs_blocked, per_core_irq_pct, per_core_softirq_pct, interrupt_data, monitor_cpu_utime, monitor_cpu_stime) VALUES ($TIMESTAMP, $TIMESTAMP_MS, $cpu_user, $cpu_nice, $cpu_sys, $cpu_idle, $cpu_iowait, $cpu_irq, $cpu_softirq, $cpu_steal, '$per_core_stats', '$per_core_freq', $cpu_temp, $mem_total, $mem_free, $mem_available, '$gpu_driver', $gpu_freq, $gpu_runtime, $gpu_mem_used, $gpu_mem_total, '$npu_info', $net_rx, $net_tx, $disk_read, $disk_write, $ctxt, $load_1m, $load_5m, $load_15m, $procs_running, $procs_blocked, '$per_core_irq_pct', '$per_core_softirq_pct', '$interrupt_data', $monitor_utime, $monitor_stime);" 2>>/tmp/monitor_db_errors.log; then
+        if ! sqlite3 "$DB_PATH" "INSERT INTO monitoring_data (timestamp, timestamp_ms, cpu_user, cpu_nice, cpu_sys, cpu_idle, cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz, cpu_temp_millideg, cpu_power_uj, mem_total_kb, mem_free_kb, mem_available_kb, gpu_driver, gpu_freq_mhz, gpu_runtime_ms, gpu_memory_used_bytes, gpu_memory_total_bytes, npu_info, net_rx_bytes, net_tx_bytes, disk_read_sectors, disk_write_sectors, ctxt, load_avg_1m, load_avg_5m, load_avg_15m, procs_running, procs_blocked, per_core_irq_pct, per_core_softirq_pct, interrupt_data, monitor_cpu_utime, monitor_cpu_stime) VALUES ($TIMESTAMP, $TIMESTAMP_MS, $cpu_user, $cpu_nice, $cpu_sys, $cpu_idle, $cpu_iowait, $cpu_irq, $cpu_softirq, $cpu_steal, '$per_core_stats', '$per_core_freq', $cpu_temp, $cpu_power_uj, $mem_total, $mem_free, $mem_available, '$gpu_driver', $gpu_freq, $gpu_runtime, $gpu_mem_used, $gpu_mem_total, '$npu_info', $net_rx, $net_tx, $disk_read, $disk_write, $ctxt, $load_1m, $load_5m, $load_15m, $procs_running, $procs_blocked, '$per_core_irq_pct', '$per_core_softirq_pct', '$interrupt_data', $monitor_utime, $monitor_stime);" 2>>/tmp/monitor_db_errors.log; then
             echo "[$(date)] DB INSERT failed at timestamp $TIMESTAMP" >> /tmp/monitor_db_errors.log
         fi
         
         # Output JSON to stdout (for SSH streaming to host)
         # Send RAW gpu_runtime_ms AND timestamp_ms for accurate host-side calculation
         # Tier 1 fields are included conditionally (null values if disabled)
-        printf '{"timestamp_ms":%s,"cpu_raw":{"user":%d,"nice":%d,"sys":%d,"idle":%d,"iowait":%d,"irq":%d,"softirq":%d,"steal":%d},"per_core_raw":[%s],"per_core_freq_khz":[%s],"cpu_temp_millideg":%d,"mem_total_kb":%d,"mem_free_kb":%d,"mem_available_kb":%d,"gpu_driver":"%s","gpu_freq_mhz":%d,"gpu_runtime_ms":%d,"gpu_memory_used_bytes":%d,"gpu_memory_total_bytes":%d,"npu_info":"%s","net_rx_bytes":%d,"net_tx_bytes":%d,"disk_read_sectors":%d,"disk_write_sectors":%d,"ctxt":%s,"load_avg_1m":%s,"load_avg_5m":%s,"load_avg_15m":%s,"procs_running":%s,"procs_blocked":%s,"per_core_irq_pct":%s,"per_core_softirq_pct":%s,"interrupt_data":%s,"monitor_cpu_utime":%d,"monitor_cpu_stime":%d}\n' \
+        printf '{"timestamp_ms":%s,"cpu_raw":{"user":%d,"nice":%d,"sys":%d,"idle":%d,"iowait":%d,"irq":%d,"softirq":%d,"steal":%d},"per_core_raw":[%s],"per_core_freq_khz":[%s],"cpu_temp_millideg":%d,"cpu_power_uj":%s,"mem_total_kb":%d,"mem_free_kb":%d,"mem_available_kb":%d,"gpu_driver":"%s","gpu_freq_mhz":%d,"gpu_runtime_ms":%d,"gpu_memory_used_bytes":%d,"gpu_memory_total_bytes":%d,"npu_info":"%s","net_rx_bytes":%d,"net_tx_bytes":%d,"disk_read_sectors":%d,"disk_write_sectors":%d,"ctxt":%s,"load_avg_1m":%s,"load_avg_5m":%s,"load_avg_15m":%s,"procs_running":%s,"procs_blocked":%s,"per_core_irq_pct":%s,"per_core_softirq_pct":%s,"interrupt_data":%s,"monitor_cpu_utime":%d,"monitor_cpu_stime":%d}\n' \
             "$TIMESTAMP_MS" \
             "$cpu_user" "$cpu_nice" "$cpu_sys" "$cpu_idle" "$cpu_iowait" "$cpu_irq" "$cpu_softirq" "$cpu_steal" \
-            "$per_core_stats" "$per_core_freq" "$cpu_temp" \
+            "$per_core_stats" "$per_core_freq" "$cpu_temp" "$cpu_power_uj" \
             "$mem_total" "$mem_free" "$mem_available" \
             "$gpu_driver" "$gpu_freq" "$gpu_runtime" "$gpu_mem_used" "$gpu_mem_total" \
             "$npu_info" \
