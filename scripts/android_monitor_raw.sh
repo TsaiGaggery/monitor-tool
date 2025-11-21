@@ -6,10 +6,15 @@
 
 INTERVAL=${1:-1}
 ENABLE_TIER1=${2:-0}  # 0=disabled, 1=enabled (Tier 1 metrics: ctxt, load, procs, irq%)
+ENABLE_DB=${3:-1}     # 0=disabled, 1=enabled (SQLite logging)
 DB_PATH="/data/local/tmp/monitor.db"
 
 # Initialize database (recreate to ensure schema is up to date)
 init_database() {
+    if [ "$ENABLE_DB" -ne 1 ]; then
+        return
+    fi
+    
     # Remove old database if it exists to avoid schema mismatch
     rm -f "$DB_PATH"
     
@@ -56,7 +61,19 @@ init_database() {
         "    monitor_cpu_stime INTEGER," \
         "    cpu_power_uj BIGINT" \
         ");" \
+        "CREATE TABLE IF NOT EXISTS process_data (" \
+        "    id INTEGER PRIMARY KEY AUTOINCREMENT," \
+        "    timestamp INTEGER NOT NULL," \
+        "    pid INTEGER," \
+        "    name TEXT," \
+        "    cpu_percent REAL," \
+        "    memory_rss INTEGER," \
+        "    cmdline TEXT," \
+        "    status TEXT," \
+        "    num_threads INTEGER" \
+        ");" \
         "CREATE INDEX IF NOT EXISTS idx_timestamp ON raw_samples(timestamp);" \
+        "CREATE INDEX IF NOT EXISTS idx_proc_timestamp ON process_data(timestamp);" \
         | sqlite3 "$DB_PATH"
 }
 
@@ -483,7 +500,32 @@ get_disk_raw() {
     awk '{read_sectors += $6; write_sectors += $10} END {printf "%d %d", read_sectors, write_sectors}'
 }
 
-# Main streaming loop
+# Collect and store top processes
+collect_top_processes() {
+    local ts=$1
+    
+    # Get top 5 processes by CPU usage
+    # Format: pid, pcpu, rss, state, comm
+    # Use grep -v to skip header, sort by CPU (2nd col), take top 5
+    ps -A -o pid,pcpu,rss,s,comm | grep -v PID | sort -rn -k2 | head -n 5 | while read -r pid pcpu rss state comm; do
+        # Escape quotes in comm for SQL
+        safe_comm=$(echo "$comm" | sed "s/'/''/g")
+        
+        # Insert into process_data
+        # Note: cmdline is same as name (comm) on Android usually
+        # num_threads set to 0 as it's hard to get efficiently in one pass
+        if [ "$ENABLE_DB" -eq 1 ]; then
+            sqlite3 "$DB_PATH" "INSERT INTO process_data (timestamp, pid, name, cpu_percent, memory_rss, cmdline, status, num_threads) VALUES ($ts, $pid, '$safe_comm', $pcpu, $rss, '$safe_comm', '$state', 0);"
+        fi
+        
+        # Output JSON for realtime display (one line per process)
+        # Format: {"type":"process","pid":...,"name":"...","cpu":...,"mem":...,"cmd":"..."}
+        printf '{"type":"process","pid":%d,"name":"%s","cpu":%.1f,"mem":%d,"cmd":"%s"}\n' \
+            "$pid" "$safe_comm" "$pcpu" "$rss" "$safe_comm"
+    done
+}
+
+# Main monitoring loop
 main() {
     echo "Starting raw data stream (interval: ${INTERVAL}s)" >&2
     
@@ -492,6 +534,10 @@ main() {
     
     # Detect GPU driver type once at startup
     GPU_DRIVER=$(get_gpu_driver_type)
+    
+    # Counter for process collection throttling
+    LOOP_COUNT=0
+    PROCESS_INTERVAL=5  # Collect processes every 5 iterations to save CPU
     
     while true; do
         # Use millisecond precision for accurate timing
@@ -546,9 +592,20 @@ main() {
         TIMESTAMP_MS=$(date +%s%3N)
         
         # Insert into SQLite database (with proper escaping for JSON arrays)
-        sqlite3 "$DB_PATH" "INSERT INTO raw_samples (timestamp, timestamp_ms, cpu_user, cpu_nice, cpu_sys, cpu_idle, cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz, cpu_temp_millideg, mem_total_kb, mem_free_kb, mem_available_kb, gpu_driver, gpu_freq_mhz, gpu_runtime_ms, gpu_memory_used_bytes, gpu_memory_total_bytes, npu_info, net_rx_bytes, net_tx_bytes, disk_read_sectors, disk_write_sectors, ctxt, load_avg_1m, load_avg_5m, load_avg_15m, procs_running, procs_blocked, per_core_irq_pct, per_core_softirq_pct, interrupt_data, monitor_cpu_utime, monitor_cpu_stime, cpu_power_uj) VALUES ($TIMESTAMP, $TIMESTAMP_MS, $cpu_user, $cpu_nice, $cpu_sys, $cpu_idle, $cpu_iowait, $cpu_irq, $cpu_softirq, $cpu_steal, '$per_core_stats', '$per_core_freq', $cpu_temp, $mem_total, $mem_free, $mem_available, '$GPU_DRIVER', $gpu_freq, $gpu_runtime, $gpu_mem_used, $gpu_mem_total, 'none', $net_rx, $net_tx, $disk_read, $disk_write, $ctxt, $load_1m, $load_5m, $load_15m, $procs_running, $procs_blocked, '$per_core_irq_pct', '$per_core_softirq_pct', '$interrupt_data', $monitor_utime, $monitor_stime, $cpu_power_uj);"
+        # Log every write attempt so we can trace timestamps
+        # echo "[$(date '+%F %T')] INSERT timestamp=$TIMESTAMP runtime_ms=$gpu_runtime mem_used=$gpu_mem_used" >> /data/local/tmp/monitor_db_writes.log
         
-        # Output JSON - single line with printf (no line wrapping issues)
+        if [ "$ENABLE_DB" -eq 1 ]; then
+            sqlite3 "$DB_PATH" "INSERT INTO raw_samples (timestamp, timestamp_ms, cpu_user, cpu_nice, cpu_sys, cpu_idle, cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz, cpu_temp_millideg, mem_total_kb, mem_free_kb, mem_available_kb, gpu_driver, gpu_freq_mhz, gpu_runtime_ms, gpu_memory_used_bytes, gpu_memory_total_bytes, npu_info, net_rx_bytes, net_tx_bytes, disk_read_sectors, disk_write_sectors, ctxt, load_avg_1m, load_avg_5m, load_avg_15m, procs_running, procs_blocked, per_core_irq_pct, per_core_softirq_pct, interrupt_data, monitor_cpu_utime, monitor_cpu_stime, cpu_power_uj) VALUES ($TIMESTAMP, $TIMESTAMP_MS, $cpu_user, $cpu_nice, $cpu_sys, $cpu_idle, $cpu_iowait, $cpu_irq, $cpu_softirq, $cpu_steal, '$per_core_stats', '$per_core_freq', $cpu_temp, $mem_total, $mem_free, $mem_available, '$gpu_driver', $gpu_freq_mhz, $gpu_runtime, $gpu_mem_used, $gpu_mem_total, '$npu_info', $net_rx, $net_tx, $disk_read, $disk_write, $ctxt, $load_1m, $load_5m, $load_15m, $procs_running, $procs_blocked, '$per_core_irq_pct', '$per_core_softirq_pct', '$interrupt_data', $monitor_utime, $monitor_stime, $cpu_power_uj);"
+        fi
+        
+        # Collect and store top processes (throttled)
+        if [ $((LOOP_COUNT % PROCESS_INTERVAL)) -eq 0 ]; then
+            collect_top_processes "$TIMESTAMP"
+        fi
+        LOOP_COUNT=$((LOOP_COUNT + 1))
+        
+        # Output JSON to stdout (for ADB streaming to host)
         # Send RAW gpu_runtime_ms AND timestamp_ms for accurate host-side calculation
         # gpu_driver: "i915" (runtime=active time) or "xe" (runtime=idle time, util=100-idle%)
         # npu_info: "none" for Android (NPU support typically not available on Android x86)

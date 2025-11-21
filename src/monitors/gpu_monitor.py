@@ -27,7 +27,10 @@ class GPUMonitor:
         
         if self.nvidia_available:
             try:
-                import pynvml
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", category=FutureWarning)
+                    import pynvml
                 self.pynvml = pynvml
                 self.pynvml.nvmlInit()
                 self.device_count = self.pynvml.nvmlDeviceGetCount()

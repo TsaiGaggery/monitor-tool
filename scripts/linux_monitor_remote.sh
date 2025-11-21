@@ -58,7 +58,19 @@ init_database() {
         "    monitor_cpu_utime INTEGER," \
         "    monitor_cpu_stime INTEGER" \
         ");" \
+        "CREATE TABLE IF NOT EXISTS process_data (" \
+        "    id INTEGER PRIMARY KEY AUTOINCREMENT," \
+        "    timestamp INTEGER NOT NULL," \
+        "    pid INTEGER," \
+        "    name TEXT," \
+        "    cpu_percent REAL," \
+        "    memory_rss INTEGER," \
+        "    cmdline TEXT," \
+        "    status TEXT," \
+        "    num_threads INTEGER" \
+        ");" \
         "CREATE INDEX IF NOT EXISTS idx_timestamp ON monitoring_data(timestamp);" \
+        "CREATE INDEX IF NOT EXISTS idx_proc_timestamp ON process_data(timestamp);" \
         | sqlite3 "$DB_PATH"
         
     # Attempt to add cpu_power_uj column if it doesn't exist (for existing DBs)
@@ -625,12 +637,40 @@ get_disk_stats() {
     echo "$read_sectors $write_sectors"
 }
 
+# Collect and store top processes
+collect_top_processes() {
+    local ts=$1
+    
+    # Get top 5 processes by CPU usage
+    # Format: pid, pcpu, rss, state, nlwp, args
+    # Use --no-headers to skip header
+    ps -eo pid,pcpu,rss,state,nlwp,args --sort=-pcpu --no-headers | head -n 5 | while read -r pid pcpu rss state nlwp args; do
+        # Extract name from args (first word, basename)
+        name=$(basename "${args%% *}")
+        # Escape quotes in args and name for SQL
+        safe_args=$(echo "$args" | sed "s/'/''/g")
+        safe_name=$(echo "$name" | sed "s/'/''/g")
+        
+        # Insert into process_data
+        sqlite3 "$DB_PATH" "INSERT INTO process_data (timestamp, pid, name, cpu_percent, memory_rss, cmdline, status, num_threads) VALUES ($ts, $pid, '$safe_name', $pcpu, $rss, '$safe_args', '$state', $nlwp);" 2>>/tmp/monitor_db_errors.log
+        
+        # Output JSON for realtime display (one line per process)
+        # Format: {"type":"process","pid":...,"name":"...","cpu":...,"mem":...,"cmd":"..."}
+        printf '{"type":"process","pid":%d,"name":"%s","cpu":%.1f,"mem":%d,"cmd":"%s"}\n' \
+            "$pid" "$safe_name" "$pcpu" "$rss" "$safe_args"
+    done
+}
+
 # Main monitoring loop
 main() {
     echo "Starting remote Linux monitor..." >&2
     
     # Initialize database on remote device (redirect errors to stderr to avoid mixing with JSON stdout)
     init_database 2>&2
+    
+    # Counter for process collection throttling
+    LOOP_COUNT=0
+    PROCESS_INTERVAL=5  # Collect processes every 5 iterations to save CPU
     
     while true; do
         LOOP_START=$(date +%s%3N)
@@ -701,6 +741,12 @@ main() {
         if ! sqlite3 "$DB_PATH" "INSERT INTO monitoring_data (timestamp, timestamp_ms, cpu_user, cpu_nice, cpu_sys, cpu_idle, cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz, cpu_temp_millideg, cpu_power_uj, mem_total_kb, mem_free_kb, mem_available_kb, gpu_driver, gpu_freq_mhz, gpu_runtime_ms, gpu_memory_used_bytes, gpu_memory_total_bytes, npu_info, net_rx_bytes, net_tx_bytes, disk_read_sectors, disk_write_sectors, ctxt, load_avg_1m, load_avg_5m, load_avg_15m, procs_running, procs_blocked, per_core_irq_pct, per_core_softirq_pct, interrupt_data, monitor_cpu_utime, monitor_cpu_stime) VALUES ($TIMESTAMP, $TIMESTAMP_MS, $cpu_user, $cpu_nice, $cpu_sys, $cpu_idle, $cpu_iowait, $cpu_irq, $cpu_softirq, $cpu_steal, '$per_core_stats', '$per_core_freq', $cpu_temp, $cpu_power_uj, $mem_total, $mem_free, $mem_available, '$gpu_driver', $gpu_freq, $gpu_runtime, $gpu_mem_used, $gpu_mem_total, '$npu_info', $net_rx, $net_tx, $disk_read, $disk_write, $ctxt, $load_1m, $load_5m, $load_15m, $procs_running, $procs_blocked, '$per_core_irq_pct', '$per_core_softirq_pct', '$interrupt_data', $monitor_utime, $monitor_stime);" 2>>/tmp/monitor_db_errors.log; then
             echo "[$(date)] DB INSERT failed at timestamp $TIMESTAMP" >> /tmp/monitor_db_errors.log
         fi
+        
+        # Collect and store top processes (throttled)
+        if [ $((LOOP_COUNT % PROCESS_INTERVAL)) -eq 0 ]; then
+            collect_top_processes "$TIMESTAMP"
+        fi
+        LOOP_COUNT=$((LOOP_COUNT + 1))
         
         # Output JSON to stdout (for SSH streaming to host)
         # Send RAW gpu_runtime_ms AND timestamp_ms for accurate host-side calculation

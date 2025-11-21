@@ -907,15 +907,22 @@ class MainWindow(QMainWindow):
                                       network_info, disk_info, tier1_info)
             
             # Log process data if available
-            if hasattr(self.data_source, 'get_process_info'):
+            if snapshot.processes:
+                self.data_logger.log_process_data(snapshot.processes)
+            elif hasattr(self.data_source, 'get_process_info'):
+                # Fallback if snapshot doesn't have it (shouldn't happen with updated snapshot)
                 processes = self.data_source.get_process_info()
                 self.data_logger.log_process_data(processes)
         
         # Update process table if it exists (for all modes)
-        if hasattr(self, 'process_table') and hasattr(self.data_source, 'get_process_info'):
-            # We might have already fetched processes above, but get_process_info is cached in ProcessMonitor
-            processes = self.data_source.get_process_info()
-            self.process_table.update_data(processes)
+        if hasattr(self, 'process_table'):
+            # Use processes from snapshot if available
+            processes = snapshot.processes
+            if not processes and hasattr(self.data_source, 'get_process_info'):
+                processes = self.data_source.get_process_info()
+            
+            if processes:
+                self.process_table.update_data(processes)
         
         # Use snapshot dict for export (includes standardized tier1 field names)
         export_data = snapshot.to_dict()

@@ -8,7 +8,6 @@ import threading
 import time
 from typing import Dict, Optional
 
-
 class ADBMonitorRaw:
     """Monitor Android device via ADB - processes raw data."""
     
@@ -30,6 +29,9 @@ class ADBMonitorRaw:
         self._latest_raw_data = {}
         self._previous_raw_data = {}
         
+        # Process data buffer
+        self._current_processes = []
+        
         # Calculated results
         self._cpu_info = self._empty_cpu_info()
         self._memory_info = self._empty_memory_info()
@@ -37,6 +39,7 @@ class ADBMonitorRaw:
         self._npu_info = self._empty_npu_info()
         self._network_info = self._empty_network_info()
         self._disk_info = self._empty_disk_info()
+        self._process_info = []
         
         # ADB streaming process
         self._stream_process = None
@@ -321,6 +324,10 @@ class ADBMonitorRaw:
             self._latest_raw_data = raw_data
             self._previous_raw_data = raw_data
             
+            # Process info (if available)
+            if 'processes' in raw_data:
+                self._process_info = raw_data['processes']
+            
             # NPU info (parse from npu_info field, similar to SSH monitor)
             npu_info_str = raw_data.get('npu_info', 'none')
             if npu_info_str and npu_info_str != 'none':
@@ -341,69 +348,6 @@ class ADBMonitorRaw:
                     self._npu_info = self._empty_npu_info()
             else:
                 self._npu_info = self._empty_npu_info()
-    
-    def _stream_worker(self):
-        """Background thread that reads streaming data from ADB."""
-        device_script = "/data/local/tmp/android_monitor_raw.sh"
-        
-        # Start ADB shell command that streams JSON data
-        # Second parameter enables Tier 1 metrics (ctxt, load avg, proc counts, irq%)
-        tier1_param = "1" if self.enable_tier1 else "0"
-        self._stream_process = subprocess.Popen(
-            ["adb", "-s", self.device_id, "shell", "sh", device_script, "1", tier1_param],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL,  # Prevent adb from stealing stdin from curses
-            text=True,
-            bufsize=1
-        )
-        
-        print(f"🚀 Streaming started from Android device (raw data mode)")
-        
-        # Skip "Starting" message
-        self._stream_process.stdout.readline()
-        
-        # Buffer for incomplete JSON lines
-        json_buffer = ""
-        
-        while self._running:
-            try:
-                # Read character by character to handle line wrapping
-                char = self._stream_process.stdout.read(1)
-                
-                if not char:
-                    break
-                
-                # Add to buffer
-                json_buffer += char
-                
-                # Check if we have a complete JSON (ends with }\n)
-                if char == '\n' and json_buffer.strip().endswith('}'):
-                    # Remove any newlines within the JSON (from terminal wrapping)
-                    json_str = json_buffer.replace('\n', '').replace('\r', '').strip()
-                    
-                    # Parse JSON data
-                    try:
-                        raw_data = json.loads(json_str)
-                        
-                        # Process raw data and calculate metrics
-                        self._process_raw_data(raw_data)
-                            
-                    except json.JSONDecodeError as e:
-                        # Skip invalid JSON
-                        print(f"⚠️  JSON parse error: {e}")
-                    
-                    # Reset buffer
-                    json_buffer = ""
-                    
-            except Exception as e:
-                print(f"⚠️  Stream error: {e}")
-                break
-        
-        # Cleanup
-        if self._stream_process:
-            self._stream_process.terminate()
-            self._stream_process.wait()
     
     def start_streaming(self):
         """Start receiving data from Android device."""
@@ -427,19 +371,20 @@ class ADBMonitorRaw:
         
         # Start streaming thread
         self._running = True
-        self._stream_thread = threading.Thread(target=self._stream_worker, daemon=True)
+        self._stream_thread = threading.Thread(target=self._stream_loop, daemon=True)
         self._stream_thread.start()
         
         # Wait for first data
-        print("⏳ Waiting for first data...")
-        for _ in range(50):  # 5 seconds timeout
+        print("⏳ Waiting for first data...", end="", flush=True)
+        for i in range(50):  # 5 seconds timeout
             with self._data_lock:
                 if self._cpu_info['cpu_count'] > 0:
-                    print("✅ Receiving and processing data from Android")
+                    print("\n✅ Receiving and processing data from Android")
                     return
+            print(".", end="", flush=True)
             time.sleep(0.1)
         
-        print("⚠️  No data received yet, continuing anyway...")
+        print("\n⚠️  No data received yet, continuing anyway...")
     
     def stop_streaming(self):
         """Stop receiving data from Android device."""
@@ -493,11 +438,19 @@ class ADBMonitorRaw:
         """Get disk information."""
         with self._data_lock:
             return self._disk_info.copy()
-    
+            
+    def get_process_info(self) -> list:
+        """Get process information."""
+        with self._data_lock:
+            return list(self._process_info)
+
+
     def get_timestamp_ms(self) -> int:
         """Get Android device timestamp in milliseconds."""
         with self._data_lock:
             return self._latest_raw_data.get('timestamp_ms', 0)
+
+    # End of class ADBMonitorRaw
     
     def get_latest_data(self) -> Dict:
         """Get latest raw data from Android device (for tier1 metrics access)."""
@@ -544,3 +497,85 @@ class ADBMonitorRaw:
             'io_stats': {},
             'partition_usage': []
         }
+    
+    def _stream_loop(self):
+        """Background loop to read streaming JSON data."""
+        try:
+            # Pass interval and tier1 flag as arguments to shell script
+            tier1_flag = "1" if self.enable_tier1 else "0"
+            device_script = "/data/local/tmp/android_monitor_raw.sh"
+            
+            # IMPORTANT: Use "sh" with separate arguments, NOT a single string
+            # This was the original working format
+            cmd = ["adb", "-s", self.device_id, "shell", "sh", device_script, "1", tier1_flag, "0"]
+            
+            self._stream_process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                bufsize=1
+            )
+            
+            # Skip "Starting" message from script
+            self._stream_process.stdout.readline()
+            
+            while self._running:
+                line = self._stream_process.stdout.readline()
+                if not line:
+                    break
+                
+                try:
+                    line = line.strip()
+                    if not line or not line.startswith('{'):
+                        continue
+                        
+                    raw_data = json.loads(line)
+                    
+                    # Check if this is a process record or a full sample
+                    if raw_data.get('type') == 'process':
+                        # Store process data
+                        proc_info = {
+                            'pid': raw_data['pid'],
+                            'name': raw_data['name'],
+                            'cpu_percent': raw_data['cpu'],
+                            'memory_rss': raw_data['mem'],
+                            'cmdline': raw_data['cmd'],
+                            'status': 'running',
+                            'num_threads': 0,
+                            'create_time': 0
+                        }
+                        with self._data_lock:
+                            self._current_processes.append(proc_info)
+                    else:
+                        # Full sample - process it
+                        # Attach process list if available
+                        with self._data_lock:
+                            if self._current_processes:
+                                self._current_processes.sort(key=lambda x: x['cpu_percent'], reverse=True)
+                                raw_data['processes'] = list(self._current_processes)
+                                self._current_processes = []
+                        
+                        # Process data WITHOUT holding lock (to avoid deadlock)
+                        try:
+                            self._process_raw_data(raw_data)
+                        except Exception as e:
+                            print(f"⚠️  Error in _process_raw_data: {e}")
+                            import traceback
+                            traceback.print_exc()
+                    
+                except json.JSONDecodeError as e:
+                    print(f"⚠️  JSON decode error: {str(e)[:100]}")
+                    continue
+                except KeyError as e:
+                    print(f"⚠️  Missing key in raw data: {e}")
+                    continue
+                except Exception as e:
+                    print(f"⚠️  Error processing stream: {e}")
+                    
+        except Exception as e:
+            print(f"ADB stream error: {e}")
+        finally:
+            if self._stream_process:
+                self._stream_process.terminate()

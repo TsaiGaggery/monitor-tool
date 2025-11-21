@@ -118,11 +118,11 @@ Tasks are organized by feature and priority. Each task includes:
 - Add retry logic for transient failures
 
 **Acceptance Criteria**:
-- [ ] SSH process collection works on remote Linux
-- [ ] Correctly parses ps aux output
-- [ ] Handles connection errors without crashing
-- [ ] Unit tests with mocked SSH client pass
-- [ ] Integration test with real SSH connection passes
+- [x] SSH process collection works on remote Linux
+- [x] Correctly parses ps aux output
+- [x] Handles connection errors without crashing
+- [x] Unit tests with mocked SSH client pass
+- [x] Integration test with real SSH connection passes
 
 **Files to Modify**:
 - `src/monitors/process_monitor.py`
@@ -143,11 +143,11 @@ Tasks are organized by feature and priority. Each task includes:
 - Add error handling for ADB disconnections
 
 **Acceptance Criteria**:
-- [ ] ADB process collection works on Android
-- [ ] Correctly parses top output
-- [ ] Handles ADB errors gracefully
-- [ ] Unit tests with mocked ADB device pass
-- [ ] Integration test with real device passes
+- [x] ADB process collection works on Android
+- [x] Correctly parses top output
+- [x] Handles ADB errors gracefully
+- [x] Unit tests with mocked ADB device pass
+- [x] Integration test with real device passes
 
 **Files to Modify**:
 - `src/monitors/process_monitor.py`

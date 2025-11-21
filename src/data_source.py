@@ -433,6 +433,14 @@ class AndroidDataSource(MonitorDataSource):
         self.enable_tier1 = enable_tier1
         self.adb_monitor = None
         self._connected = False
+        
+        # Initialize ProcessMonitor for ADB mode
+        from monitors.process_monitor import ProcessMonitor
+        self.process_monitor = ProcessMonitor(
+            config={'enabled': True},
+            mode='adb',
+            adb_device=f"{device_ip}:{port}"
+        )
     
     def connect(self) -> bool:
         """Connect to Android device via ADB."""
@@ -569,6 +577,12 @@ class AndroidDataSource(MonitorDataSource):
             'partition_usage': partitions_list
         }
     
+    def get_process_info(self) -> list:
+        """Get process information from Android device."""
+        if not self.is_connected():
+            return []
+        return self.adb_monitor.get_process_info()
+
     def get_tier1_info(self) -> Dict:
         """Get Tier 1 metrics from Android device.
         
@@ -782,6 +796,17 @@ class RemoteLinuxDataSource(MonitorDataSource):
             enable_tier1=enable_tier1
         )
         
+        # Initialize ProcessMonitor for SSH mode
+        # Note: We pass the ssh_monitor.ssh_client which might be None initially,
+        # but ProcessMonitor will check for it before use.
+        # We'll update it in connect()
+        from monitors.process_monitor import ProcessMonitor
+        self.process_monitor = ProcessMonitor(
+            config={'enabled': True},  # Default config, can be overridden
+            mode='ssh',
+            ssh_client=self.ssh_monitor.ssh_client
+        )
+        
         self._connected = False
         self.session_start_time = None  # Track when monitoring session started
         
@@ -806,6 +831,9 @@ class RemoteLinuxDataSource(MonitorDataSource):
         if self.ssh_monitor.connect():
             self.ssh_monitor.start_monitoring()
             self._connected = True
+            
+            # Update ProcessMonitor with the connected SSH client
+            self.process_monitor.ssh_client = self.ssh_monitor.ssh_client
             
             # Wait for initial data to arrive (actively poll for up to 1 second)
             # Since UI now supports dynamic updates, we don't need to block for long
@@ -1196,7 +1224,12 @@ class RemoteLinuxDataSource(MonitorDataSource):
         
         self._cached_disk_info = result
         return result
-    
+
+    def get_process_info(self) -> list:
+        """Get process information from remote system."""
+        # Use streamed process data from SSHMonitorRaw instead of separate SSH command
+        return self.ssh_monitor.get_process_info()
+
     def get_tier1_info(self) -> Dict:
         """Get Tier 1 metrics from remote Linux system.
         

@@ -30,6 +30,9 @@ class MonitoringSnapshot:
         self.network: Dict[str, Any] = {}
         self.disk: Dict[str, Any] = {}
         
+        # Process list (optional, may be empty)
+        self.processes: list = []
+        
         # Optional tier1 metrics (None if not available/enabled)
         self.tier1: Optional[Dict[str, Any]] = None
     
@@ -53,6 +56,10 @@ class MonitoringSnapshot:
             snapshot.npu = data_source.get_npu_info() or {}
             snapshot.network = data_source.get_network_info() or {}
             snapshot.disk = data_source.get_disk_info() or {}
+            
+            # Collect process info if available
+            if hasattr(data_source, 'get_process_info'):
+                snapshot.processes = data_source.get_process_info() or []
             
             # Collect tier1 if available (may not be implemented on all sources)
             if hasattr(data_source, 'get_tier1_info'):
@@ -81,7 +88,8 @@ class MonitoringSnapshot:
             'gpu': self.gpu,
             'npu': self.npu,
             'network': self.network,
-            'disk': self.disk
+            'disk': self.disk,
+            'processes': self.processes
         }
         
         # Only include tier1 if present

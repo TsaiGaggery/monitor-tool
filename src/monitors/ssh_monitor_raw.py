@@ -54,6 +54,7 @@ class SSHMonitorRaw:
         self._sample_queue: Queue = Queue(maxsize=100)  # Buffer up to 100 samples
         self._latest_raw_data: Optional[Dict[str, Any]] = None
         self._prev_raw_data: Optional[Dict[str, Any]] = None  # For delta calculation
+        self._process_info: list = []  # Store latest process info separately
         
         # Previous GPU runtime for utilization calculation (host-side)
         self._prev_gpu_runtime_ms: Optional[int] = None
@@ -240,7 +241,37 @@ class SSHMonitorRaw:
                 try:
                     # Parse JSON data
                     raw_data = json.loads(line)
-                    self._process_raw_data(raw_data)
+                    
+                    # Check if this is a process record or a full sample
+                    if raw_data.get('type') == 'process':
+                        # Store process data in a temporary list
+                        if not hasattr(self, '_current_processes'):
+                            self._current_processes = []
+                        
+                        # Convert to ProcessInfo-like dict
+                        proc_info = {
+                            'pid': raw_data['pid'],
+                            'name': raw_data['name'],
+                            'cpu_percent': raw_data['cpu'],
+                            'memory_rss': raw_data['mem'],
+                            'cmdline': raw_data['cmd'],
+                            'status': 'running', # Default
+                            'num_threads': 0,
+                            'create_time': 0
+                        }
+                        self._current_processes.append(proc_info)
+                    else:
+                        # Full sample - process it
+                        # If we have collected processes, attach them
+                        if hasattr(self, '_current_processes') and self._current_processes:
+                            # Sort by CPU desc
+                            self._current_processes.sort(key=lambda x: x['cpu_percent'], reverse=True)
+                            # Attach to raw data (will be used by get_process_info)
+                            raw_data['processes'] = self._current_processes
+                            # Reset for next batch
+                            self._current_processes = []
+                            
+                        self._process_raw_data(raw_data)
                     
                 except json.JSONDecodeError as e:
                     print(f"JSON parse error: {e}")
@@ -277,6 +308,10 @@ class SSHMonitorRaw:
             
             # Calculate NPU utilization from delta
             self._npu_info = self._calculate_npu_info(raw_data, prev)
+            
+            # Update process info if available in this sample
+            if 'processes' in raw_data:
+                self._process_info = raw_data['processes']
             
             # Update stored data
             self._prev_raw_data = self._latest_raw_data
@@ -401,6 +436,11 @@ class SSHMonitorRaw:
         """Get computed NPU info (already calculated in _process_raw_data)"""
         with self._lock:
             return self._npu_info.copy() if self._npu_info else {'available': False}
+            
+    def get_process_info(self) -> list:
+        """Get latest process info from raw data"""
+        with self._lock:
+            return list(self._process_info)
     
     def get_latest_data(self) -> Optional[Dict[str, Any]]:
         """Get latest monitoring data"""

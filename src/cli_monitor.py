@@ -493,6 +493,10 @@ class CLIMonitor:
                             npu_info=snapshot.npu,
                             tier1_info=snapshot.tier1  # Tier1 now automatically included!
                         )
+                        
+                        # Log process data if available
+                        if snapshot.processes:
+                            self.logger.log_process_data(snapshot.processes)
                     
                     # Add to session exporter (for Android/SSH export)
                     # For LocalDataSource, we rely on SQLite DB to avoid double storage in memory
