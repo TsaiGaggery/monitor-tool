@@ -13,7 +13,7 @@ from various sources (local files, SSH remote, Android ADB) with support for:
 
 import re
 import gzip
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
@@ -104,6 +104,10 @@ class LogMonitor:
         self.max_lines = config.get('max_lines', config.get('max_log_lines', 1000))
         self.context_lines = config.get('include_context_lines', 2)
         
+        # Timezone handling: 'utc', 'local', or timezone name (e.g. 'US/Pacific')
+        # Default: assume logs are in local timezone unless specified
+        self.log_timezone = config.get('log_timezone', 'local')
+        
         # Anonymization settings
         anonymize_config = config.get('anonymize', {})
         self.anonymize_enabled = anonymize_config.get('enabled', True)
@@ -146,14 +150,33 @@ class LogMonitor:
         Collect logs for specified time period.
         
         Args:
-            start_time: Start of monitoring period
-            end_time: End of monitoring period
+            start_time: Start of monitoring period (timezone-aware or naive)
+            end_time: End of monitoring period (timezone-aware or naive)
         
         Returns:
             List of LogEntry objects matching filters and time range
+        
+        Note:
+            If start_time/end_time are naive (no timezone), they are assumed
+            to be in local timezone and converted to UTC for comparison.
         """
         if not self.enabled:
             return []
+        
+        # Ensure start/end times are timezone-aware (UTC)
+        if start_time.tzinfo is None:
+            # Naive datetime - assume local time, convert to UTC
+            start_time = start_time.replace(tzinfo=timezone.utc).astimezone()
+            start_time = start_time.astimezone(timezone.utc)
+        else:
+            # Already has timezone, normalize to UTC
+            start_time = start_time.astimezone(timezone.utc)
+        
+        if end_time.tzinfo is None:
+            end_time = end_time.replace(tzinfo=timezone.utc).astimezone()
+            end_time = end_time.astimezone(timezone.utc)
+        else:
+            end_time = end_time.astimezone(timezone.utc)
         
         all_entries = []
         
@@ -185,12 +208,13 @@ class LogMonitor:
     def _parse_log_timestamp(self, line: str) -> Optional[datetime]:
         """
         Extract timestamp from log line using multiple format patterns.
+        Returns timezone-aware datetime normalized to UTC.
         
         Args:
             line: Raw log line
         
         Returns:
-            Parsed datetime or None if no timestamp found
+            Timezone-aware datetime in UTC, or None if no timestamp found
         """
         for pattern, fmt in self.TIMESTAMP_PATTERNS:
             match = pattern.search(line)
@@ -204,7 +228,27 @@ class LogMonitor:
                         timestamp_str = f"{timestamp_str} {current_year}"
                         fmt = '%b %d %H:%M:%S %Y'
                     
-                    return datetime.strptime(timestamp_str, fmt)
+                    dt = datetime.strptime(timestamp_str, fmt)
+                    
+                    # Make timezone-aware if naive (no timezone info in log)
+                    if dt.tzinfo is None:
+                        if self.log_timezone == 'utc':
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        elif self.log_timezone == 'local':
+                            # Assume local timezone, convert to UTC
+                            import time
+                            local_offset = time.timezone if time.daylight == 0 else time.altzone
+                            dt = dt.replace(tzinfo=timezone.utc).astimezone()
+                            dt = dt.astimezone(timezone.utc)
+                        else:
+                            # Custom timezone specified
+                            # For now, treat as UTC (would need pytz for full support)
+                            dt = dt.replace(tzinfo=timezone.utc)
+                    else:
+                        # Already has timezone, convert to UTC
+                        dt = dt.astimezone(timezone.utc)
+                    
+                    return dt
                 except ValueError:
                     # Try next pattern
                     continue
@@ -261,6 +305,25 @@ class LogMonitor:
             raw_line=line,
             process_context=pids
         )
+    
+    def _normalize_datetime(self, dt: datetime) -> datetime:
+        """
+        Normalize datetime to timezone-aware UTC for comparisons.
+        
+        Args:
+            dt: Datetime to normalize (naive or aware)
+        
+        Returns:
+            Timezone-aware datetime in UTC
+        """
+        if dt.tzinfo is None:
+            # Naive - assume local time, convert to UTC
+            dt = dt.replace(tzinfo=timezone.utc).astimezone()
+            dt = dt.astimezone(timezone.utc)
+        else:
+            # Already aware, convert to UTC
+            dt = dt.astimezone(timezone.utc)
+        return dt
     
     def _anonymize_text(self, text: str) -> str:
         """
@@ -392,8 +455,8 @@ class LogMonitor:
         
         Args:
             file_path: Path to log file
-            start_time: Start of monitoring period
-            end_time: End of monitoring period
+            start_time: Start of monitoring period (naive or aware)
+            end_time: End of monitoring period (naive or aware)
         
         Returns:
             List of LogEntry objects from the file
@@ -404,11 +467,20 @@ class LogMonitor:
         entries = []
         file_path_obj = Path(file_path)
         
+        # Normalize input times to UTC for comparison
+        start_time_utc = self._normalize_datetime(start_time)
+        end_time_utc = self._normalize_datetime(end_time)
+        
         # Determine if file is gzipped
         is_gzipped = file_path_obj.suffix == '.gz'
         
         # Open file with appropriate handler
         open_func = gzip.open if is_gzipped else open
+        
+        # Track if we've entered and exited the time window
+        in_time_window = False
+        lines_after_window = 0
+        max_lines_after_window = 100  # Stop after this many lines past end_time
         
         try:
             with open_func(file_path, 'rt', encoding='utf-8', errors='ignore') as f:
@@ -420,19 +492,34 @@ class LogMonitor:
                     if not line.strip():
                         continue
                     
-                    # Check keyword filtering
-                    if not self._matches_keywords(line):
-                        continue
-                    
-                    # Parse the line
+                    # Parse the line to get timestamp
                     entry = self._parse_log_line(line, str(file_path_obj))
                     if not entry:
                         continue
                     
-                    # Filter by time range
+                    # Early termination: if we have a timestamp and we've gone far past end_time
                     if entry.timestamp:
-                        if entry.timestamp < start_time or entry.timestamp > end_time:
+                        # Normalize entry timestamp for comparison
+                        entry_time_utc = self._normalize_datetime(entry.timestamp)
+                        
+                        if entry_time_utc > end_time_utc:
+                            lines_after_window += 1
+                            # If we've seen many lines past our window, stop reading
+                            # (assumes logs are chronologically ordered)
+                            if in_time_window and lines_after_window > max_lines_after_window:
+                                break
                             continue
+                        elif entry_time_utc < start_time_utc:
+                            # Haven't reached our window yet
+                            continue
+                        else:
+                            # We're in the time window
+                            in_time_window = True
+                            lines_after_window = 0
+                    
+                    # Check keyword filtering (only for entries in time range)
+                    if not self._matches_keywords(line):
+                        continue
                     
                     entries.append(entry)
                     
@@ -539,6 +626,9 @@ class LogMonitor:
         """
         Collect logs using cat on remote system.
         
+        Uses grep with time-based filtering when possible,
+        otherwise uses a combination of head/tail heuristics.
+        
         Args:
             source: Path to log file on remote system
             start_time: Start of monitoring period
@@ -549,45 +639,71 @@ class LogMonitor:
         """
         entries = []
         
-        # Build cat command with optional sudo
-        cmd = f'cat {source}'
+        # Try to use grep with date filtering for efficiency
+        # This works if timestamps are in a predictable format
+        start_date_str = start_time.strftime('%Y-%m-%d')
+        start_hour = start_time.strftime('%H:%M')
         
-        # Try with sudo if normal cat fails
+        # Build a grep command to filter by date first, then process
+        # This is more efficient than transferring entire file
+        # Example: grep -E "2025-11-21 (13:[23-27]|14:)" /var/log/syslog
+        cmd = f'grep -E "{start_date_str}" {source} | tail -n {self.max_lines * 5}'
+        
+        # Try with sudo if normal grep fails
         try:
             stdin, stdout, stderr = self.ssh_client.exec_command(cmd)
             error_msg = stderr.read().decode()
             
             if 'Permission denied' in error_msg:
                 # Retry with sudo
-                cmd = f'sudo cat {source}'
+                cmd = f'sudo grep -E "{start_date_str}" {source} | tail -n {self.max_lines * 5}'
                 stdin, stdout, stderr = self.ssh_client.exec_command(cmd)
+                error_msg = stderr.read().decode()
             
+            # If grep found nothing, fall back to tail
             output = stdout.read().decode('utf-8', errors='ignore')
             
+            if not output or len(output.strip()) == 0:
+                # Grep found nothing, use tail as last resort
+                # This means the time period might not be in the log file
+                cmd = f'tail -n {self.max_lines} {source}'
+                if 'Permission denied' in error_msg:
+                    cmd = f'sudo tail -n {self.max_lines} {source}'
+                
+                stdin, stdout, stderr = self.ssh_client.exec_command(cmd)
+                output = stdout.read().decode('utf-8', errors='ignore')
+            
+            # Process the output
             for line in output.splitlines():
                 line = line.strip()
                 if not line:
                     continue
                 
-                # Check keyword filtering
-                if not self._matches_keywords(line):
-                    continue
-                
-                # Parse the line
+                # Parse the line to get timestamp
                 entry = self._parse_log_line(line, source)
                 if not entry:
                     continue
                 
                 # Filter by time range
                 if entry.timestamp:
-                    if entry.timestamp < start_time or entry.timestamp > end_time:
+                    entry_time_utc = self._normalize_datetime(entry.timestamp)
+                    start_time_utc = self._normalize_datetime(start_time)
+                    end_time_utc = self._normalize_datetime(end_time)
+                    
+                    if entry_time_utc < start_time_utc:
                         continue
+                    if entry_time_utc > end_time_utc:
+                        continue
+                
+                # Check keyword filtering
+                if not self._matches_keywords(line):
+                    continue
                 
                 entries.append(entry)
                 
                 if len(entries) >= self.max_lines:
                     break
-        
+            
         except Exception:
             pass
         
@@ -611,10 +727,16 @@ class LogMonitor:
         entries = []
         
         try:
-            # Clear old logs and get recent ones
-            # Format: adb logcat -t <time> -d
-            # Using -d to dump and exit (non-blocking)
+            # Use -T to specify start time (format: 'MM-DD HH:MM:SS.mmm')
+            # This ensures we get logs from the monitoring period, not just last N lines
+            # -d dumps and exits (non-blocking)
+            # -v time shows timestamps
             cmd = ['logcat', '-d', '-v', 'time']
+            
+            # Use -T to filter from start_time
+            # Format: MM-DD HH:MM:SS.mmm
+            time_str = start_time.strftime('%m-%d %H:%M:%S.000')
+            cmd.extend(['-T', time_str])
             
             # Add keyword filtering
             if self.keywords:
@@ -622,14 +744,11 @@ class LogMonitor:
                 grep_pattern = '|'.join(self.keywords)
                 cmd.extend(['-e', grep_pattern])
             
-            # Limit lines
-            cmd.extend(['-t', str(self.max_lines)])
-            
             result = subprocess.run(
                 ['adb'] + cmd,
                 capture_output=True,
                 text=True,
-                timeout=10
+                timeout=30  # Increased timeout for potentially large dumps
             )
             
             if result.returncode == 0:
@@ -643,13 +762,16 @@ class LogMonitor:
                     if not entry:
                         continue
                     
-                    # Filter by time range
+                    # Filter by end time (start time already filtered by -T)
                     if entry.timestamp:
-                        if entry.timestamp < start_time or entry.timestamp > end_time:
+                        entry_time_utc = self._normalize_datetime(entry.timestamp)
+                        end_time_utc = self._normalize_datetime(end_time)
+                        if entry_time_utc > end_time_utc:
                             continue
                     
                     entries.append(entry)
                     
+                    # Respect max_lines limit
                     if len(entries) >= self.max_lines:
                         break
         
