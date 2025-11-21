@@ -16,6 +16,7 @@ from ui.widgets.plot_widget import MonitorPlotWidget, MultiLinePlotWidget
 from ui.widgets.control_panel import ControlPanel
 from ui.widgets.info_card import InfoCard
 from ui.widgets.temperature_bar import TemperaturePanel
+from ui.widgets.process_table_widget import ProcessTableWidget
 from ui.styles import apply_dark_theme, CHART_COLORS
 
 import time
@@ -305,6 +306,13 @@ class MainWindow(QMainWindow):
         # Temperature monitoring panel
         self.temp_panel = TemperaturePanel()
         layout.addWidget(self.temp_panel)
+        
+        # Process Table (if enabled)
+        # Check if data source supports process info and it's enabled in config
+        # For LocalDataSource, it has a process_monitor attribute
+        if hasattr(self.data_source, 'process_monitor') and self.data_source.process_monitor.enabled:
+            self.process_table = ProcessTableWidget()
+            layout.addWidget(self.process_table)
         
         return widget
     
@@ -881,6 +889,12 @@ class MainWindow(QMainWindow):
             if hasattr(self.data_source, 'get_process_info'):
                 processes = self.data_source.get_process_info()
                 self.data_logger.log_process_data(processes)
+        
+        # Update process table if it exists (for all modes)
+        if hasattr(self, 'process_table') and hasattr(self.data_source, 'get_process_info'):
+            # We might have already fetched processes above, but get_process_info is cached in ProcessMonitor
+            processes = self.data_source.get_process_info()
+            self.process_table.update_data(processes)
         
         # Use snapshot dict for export (includes standardized tier1 field names)
         export_data = snapshot.to_dict()
