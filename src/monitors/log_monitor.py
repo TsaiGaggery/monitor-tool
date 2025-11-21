@@ -157,17 +157,21 @@ class LogMonitor:
         
         all_entries = []
         
-        for source in self.sources:
-            if self.mode == 'local':
-                entries = self._collect_local_logs(source, start_time, end_time)
-            elif self.mode == 'ssh':
-                entries = self._collect_ssh_logs(source, start_time, end_time)
-            elif self.mode == 'adb':
-                entries = self._collect_adb_logs(start_time, end_time)
-            else:
-                continue
-            
+        # ADB mode doesn't use sources (it reads from logcat)
+        if self.mode == 'adb':
+            entries = self._collect_adb_logs(start_time, end_time)
             all_entries.extend(entries)
+        else:
+            # Local and SSH modes iterate over sources
+            for source in self.sources:
+                if self.mode == 'local':
+                    entries = self._collect_local_logs(source, start_time, end_time)
+                elif self.mode == 'ssh':
+                    entries = self._collect_ssh_logs(source, start_time, end_time)
+                else:
+                    continue
+                
+                all_entries.extend(entries)
         
         # Sort by timestamp
         all_entries.sort(key=lambda e: e.timestamp)
@@ -448,17 +452,277 @@ class LogMonitor:
         """
         Collect logs from remote system via SSH.
         
-        Placeholder - will be implemented in TASK-011
+        Uses journalctl if available, otherwise falls back to cat.
+        
+        Args:
+            source: Path to log file on remote system
+            start_time: Start of monitoring period
+            end_time: End of monitoring period
+        
+        Returns:
+            List of LogEntry objects from remote logs
         """
-        # TODO: Implement in TASK-011
-        return []
+        if not self.ssh_client:
+            return []
+        
+        entries = []
+        
+        try:
+            # Check if journalctl is available
+            stdin, stdout, stderr = self.ssh_client.exec_command('which journalctl')
+            has_journalctl = stdout.read().decode().strip() != ''
+            
+            if has_journalctl and source in ['/var/log/syslog', '/var/log/messages', 'systemd']:
+                # Use journalctl for systemd logs
+                entries = self._collect_ssh_journalctl(start_time, end_time)
+            else:
+                # Use cat for traditional log files
+                entries = self._collect_ssh_cat(source, start_time, end_time)
+        
+        except Exception as e:
+            # Log error but don't crash
+            pass
+        
+        return entries
+    
+    def _collect_ssh_journalctl(self, start_time: datetime, 
+                                end_time: datetime) -> List[LogEntry]:
+        """
+        Collect logs using journalctl on remote system.
+        
+        Args:
+            start_time: Start of monitoring period
+            end_time: End of monitoring period
+        
+        Returns:
+            List of LogEntry objects from journalctl
+        """
+        entries = []
+        
+        # Format timestamps for journalctl
+        since = start_time.strftime('%Y-%m-%d %H:%M:%S')
+        until = end_time.strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Build journalctl command
+        cmd = f'journalctl --since "{since}" --until "{until}" --no-pager -n {self.max_lines}'
+        
+        # Add keyword filtering if configured
+        if self.keywords:
+            grep_pattern = '|'.join(self.keywords)
+            cmd += f' | grep -iE "{grep_pattern}"'
+        
+        try:
+            stdin, stdout, stderr = self.ssh_client.exec_command(cmd)
+            output = stdout.read().decode('utf-8', errors='ignore')
+            
+            for line in output.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Parse journalctl line
+                entry = self._parse_log_line(line, 'journalctl')
+                if entry:
+                    entries.append(entry)
+                    
+                if len(entries) >= self.max_lines:
+                    break
+        
+        except Exception:
+            pass
+        
+        return entries
+    
+    def _collect_ssh_cat(self, source: str,
+                        start_time: datetime,
+                        end_time: datetime) -> List[LogEntry]:
+        """
+        Collect logs using cat on remote system.
+        
+        Args:
+            source: Path to log file on remote system
+            start_time: Start of monitoring period
+            end_time: End of monitoring period
+        
+        Returns:
+            List of LogEntry objects from remote file
+        """
+        entries = []
+        
+        # Build cat command with optional sudo
+        cmd = f'cat {source}'
+        
+        # Try with sudo if normal cat fails
+        try:
+            stdin, stdout, stderr = self.ssh_client.exec_command(cmd)
+            error_msg = stderr.read().decode()
+            
+            if 'Permission denied' in error_msg:
+                # Retry with sudo
+                cmd = f'sudo cat {source}'
+                stdin, stdout, stderr = self.ssh_client.exec_command(cmd)
+            
+            output = stdout.read().decode('utf-8', errors='ignore')
+            
+            for line in output.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Check keyword filtering
+                if not self._matches_keywords(line):
+                    continue
+                
+                # Parse the line
+                entry = self._parse_log_line(line, source)
+                if not entry:
+                    continue
+                
+                # Filter by time range
+                if entry.timestamp:
+                    if entry.timestamp < start_time or entry.timestamp > end_time:
+                        continue
+                
+                entries.append(entry)
+                
+                if len(entries) >= self.max_lines:
+                    break
+        
+        except Exception:
+            pass
+        
+        return entries
     
     def _collect_adb_logs(self, start_time: datetime,
                          end_time: datetime) -> List[LogEntry]:
         """
         Collect logs from Android device via ADB (logcat).
         
-        Placeholder - will be implemented in TASK-012
+        Args:
+            start_time: Start of monitoring period
+            end_time: End of monitoring period
+        
+        Returns:
+            List of LogEntry objects from Android logcat
         """
-        # TODO: Implement in TASK-012
-        return []
+        if not self.adb_device:
+            return []
+        
+        entries = []
+        
+        try:
+            # Clear old logs and get recent ones
+            # Format: adb logcat -t <time> -d
+            # Using -d to dump and exit (non-blocking)
+            cmd = ['logcat', '-d', '-v', 'time']
+            
+            # Add keyword filtering
+            if self.keywords:
+                # Use grep filter in logcat
+                grep_pattern = '|'.join(self.keywords)
+                cmd.extend(['-e', grep_pattern])
+            
+            # Limit lines
+            cmd.extend(['-t', str(self.max_lines)])
+            
+            result = subprocess.run(
+                ['adb'] + cmd,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    # Parse Android logcat line
+                    entry = self._parse_android_logcat(line)
+                    if not entry:
+                        continue
+                    
+                    # Filter by time range
+                    if entry.timestamp:
+                        if entry.timestamp < start_time or entry.timestamp > end_time:
+                            continue
+                    
+                    entries.append(entry)
+                    
+                    if len(entries) >= self.max_lines:
+                        break
+        
+        except Exception:
+            pass
+        
+        return entries
+    
+    def _parse_android_logcat(self, line: str) -> Optional[LogEntry]:
+        """
+        Parse Android logcat line.
+        
+        Format: MM-DD HH:MM:SS.mmm PID  TID LEVEL TAG: message
+        Example: 11-21 15:30:45.123  1234  5678 I ActivityManager: Starting activity
+        
+        Args:
+            line: Raw logcat line
+        
+        Returns:
+            LogEntry object or None if parsing fails
+        """
+        import re
+        
+        # Logcat time format pattern
+        # MM-DD HH:MM:SS.mmm  PID  TID LEVEL TAG: message
+        pattern = re.compile(
+            r'^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3})\s+'  # timestamp
+            r'(\d+)\s+'  # PID
+            r'(\d+)\s+'  # TID
+            r'([VDIWEF])\s+'  # log level
+            r'([^:]+):\s*'  # tag
+            r'(.*)$'  # message
+        )
+        
+        match = pattern.match(line)
+        if not match:
+            return None
+        
+        timestamp_str, pid_str, tid_str, level_char, tag, message = match.groups()
+        
+        # Parse timestamp (add current year since logcat doesn't include it)
+        try:
+            current_year = datetime.now().year
+            timestamp_str_with_year = f"{current_year}-{timestamp_str}"
+            timestamp = datetime.strptime(timestamp_str_with_year, '%Y-%m-%d %H:%M:%S.%f')
+        except ValueError:
+            timestamp = datetime.now()
+        
+        # Map Android log levels to standard severity
+        severity_map = {
+            'V': 'debug',    # Verbose
+            'D': 'debug',    # Debug
+            'I': 'info',     # Info
+            'W': 'warning',  # Warning
+            'E': 'error',    # Error
+            'F': 'critical'  # Fatal
+        }
+        severity = severity_map.get(level_char, 'info')
+        
+        # Extract PIDs
+        pids = [int(pid_str)]
+        
+        # Anonymize if enabled
+        final_message = message
+        if self.anonymize_enabled:
+            final_message = self._anonymize_text(message)
+        
+        return LogEntry(
+            timestamp=timestamp,
+            source_file='logcat',
+            severity=severity,
+            facility=tag,
+            message=final_message,
+            raw_line=line,
+            process_context=pids
+        )

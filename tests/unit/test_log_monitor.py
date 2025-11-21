@@ -529,3 +529,229 @@ class TestFileReading:
         assert len(entries) == 1
         assert 'error' in entries[0].message.lower()
 
+
+class TestSSHLogCollection:
+    """Test SSH remote log collection."""
+    
+    def test_ssh_journalctl_collection(self, mocker):
+        """Test collecting logs via journalctl on remote system."""
+        # Mock SSH client
+        mock_ssh = mocker.Mock()
+        
+        # Mock which journalctl check
+        mock_which = mocker.Mock()
+        mock_which.read.return_value.decode.return_value.strip.return_value = '/usr/bin/journalctl'
+        
+        # Mock journalctl output
+        journalctl_output = """Nov 21 15:30:45 server systemd[1]: Starting service
+Nov 21 15:30:46 server app[1234]: ERROR Connection failed
+Nov 21 15:30:47 server kernel: WARNING Memory low
+"""
+        mock_journalctl = mocker.Mock()
+        mock_journalctl.read.return_value.decode.return_value = journalctl_output
+        
+        mock_ssh.exec_command.side_effect = [
+            (None, mock_which, None),  # which journalctl
+            (None, mock_journalctl, None)  # journalctl command
+        ]
+        
+        config = {
+            'enabled': True,
+            'sources': ['/var/log/syslog']
+        }
+        monitor = LogMonitor(config, mode='ssh', ssh_client=mock_ssh)
+        
+        start = datetime(2025, 11, 21, 15, 0, 0)
+        end = datetime(2025, 11, 21, 16, 0, 0)
+        
+        entries = monitor.collect_logs(start, end)
+        
+        assert len(entries) > 0
+        # Verify journalctl was called with correct time range
+        calls = mock_ssh.exec_command.call_args_list
+        assert any('journalctl' in str(call) for call in calls)
+    
+    def test_ssh_cat_fallback(self, mocker):
+        """Test falling back to cat when journalctl not available."""
+        mock_ssh = mocker.Mock()
+        
+        # Mock which journalctl returns empty (not found)
+        mock_which = mocker.Mock()
+        mock_which.read.return_value.decode.return_value.strip.return_value = ''
+        
+        # Mock cat output
+        cat_output = """2025-11-21T15:30:45 INFO Test message
+2025-11-21T15:30:46 ERROR Test error
+"""
+        mock_cat_stdout = mocker.Mock()
+        mock_cat_stdout.read.return_value.decode.return_value = cat_output
+        mock_cat_stderr = mocker.Mock()
+        mock_cat_stderr.read.return_value.decode.return_value = ''
+        
+        mock_ssh.exec_command.side_effect = [
+            (None, mock_which, None),  # which journalctl
+            (None, mock_cat_stdout, mock_cat_stderr)  # cat command
+        ]
+        
+        config = {
+            'enabled': True,
+            'sources': ['/var/log/app.log']
+        }
+        monitor = LogMonitor(config, mode='ssh', ssh_client=mock_ssh)
+        
+        start = datetime(2025, 11, 21, 15, 0, 0)
+        end = datetime(2025, 11, 21, 16, 0, 0)
+        
+        entries = monitor.collect_logs(start, end)
+        
+        assert len(entries) == 2
+        assert entries[0].severity == 'info'
+        assert entries[1].severity == 'error'
+    
+    def test_ssh_sudo_on_permission_denied(self, mocker):
+        """Test using sudo when permission denied."""
+        mock_ssh = mocker.Mock()
+        
+        # Mock which returns empty
+        mock_which = mocker.Mock()
+        mock_which.read.return_value.decode.return_value.strip.return_value = ''
+        
+        # First cat fails with permission denied
+        mock_stderr1 = mocker.Mock()
+        mock_stderr1.read.return_value.decode.return_value = 'Permission denied'
+        mock_stdout1 = mocker.Mock()
+        mock_stdout1.read.return_value.decode.return_value = ''
+        
+        # Second cat with sudo succeeds
+        cat_output = "2025-11-21T15:30:45 INFO Success with sudo\n"
+        mock_stdout2 = mocker.Mock()
+        mock_stdout2.read.return_value.decode.return_value = cat_output
+        mock_stderr2 = mocker.Mock()
+        mock_stderr2.read.return_value.decode.return_value = ''
+        
+        mock_ssh.exec_command.side_effect = [
+            (None, mock_which, None),  # which
+            (None, mock_stdout1, mock_stderr1),  # cat fails
+            (None, mock_stdout2, mock_stderr2)  # sudo cat succeeds
+        ]
+        
+        config = {
+            'enabled': True,
+            'sources': ['/var/log/secure']
+        }
+        monitor = LogMonitor(config, mode='ssh', ssh_client=mock_ssh)
+        
+        start = datetime(2025, 11, 21, 15, 0, 0)
+        end = datetime(2025, 11, 21, 16, 0, 0)
+        
+        entries = monitor.collect_logs(start, end)
+        
+        assert len(entries) == 1
+        assert 'Success' in entries[0].message
+
+
+class TestADBLogCollection:
+    """Test Android ADB log collection."""
+    
+    def test_adb_logcat_parsing(self):
+        """Test parsing Android logcat format."""
+        config = {'enabled': True}
+        monitor = LogMonitor(config, mode='adb', adb_device='test_device')
+        
+        # Test various logcat lines
+        test_lines = [
+            "11-21 15:30:45.123  1234  5678 I ActivityManager: Starting activity",
+            "11-21 15:30:46.456  1234  5679 E System: Connection failed",
+            "11-21 15:30:47.789  1235  5680 W Battery: Low battery warning",
+            "11-21 15:30:48.012  1236  5681 D Debug: Debug message",
+            "11-21 15:30:49.345  1237  5682 F Fatal: Critical error",
+        ]
+        
+        entries = []
+        for line in test_lines:
+            entry = monitor._parse_android_logcat(line)
+            if entry:
+                entries.append(entry)
+        
+        assert len(entries) == 5
+        
+        # Check severity mapping
+        assert entries[0].severity == 'info'  # I
+        assert entries[1].severity == 'error'  # E
+        assert entries[2].severity == 'warning'  # W
+        assert entries[3].severity == 'debug'  # D
+        assert entries[4].severity == 'critical'  # F
+        
+        # Check PID extraction
+        assert entries[0].process_context == [1234]
+        assert entries[1].process_context == [1234]
+        
+        # Check facility (tag)
+        assert entries[0].facility == 'ActivityManager'
+        assert entries[1].facility == 'System'
+    
+    def test_adb_logcat_collection(self, mocker):
+        """Test collecting logs via adb logcat."""
+        # Mock subprocess.run
+        logcat_output = """11-21 15:30:45.123  1234  5678 I Tag1: Info message
+11-21 15:30:46.456  1234  5679 E Tag2: Error message
+11-21 15:30:47.789  1235  5680 W Tag3: Warning message
+"""
+        
+        mock_result = mocker.Mock()
+        mock_result.returncode = 0
+        mock_result.stdout = logcat_output
+        
+        mock_run = mocker.patch('src.monitors.log_monitor.subprocess.run', return_value=mock_result)
+        
+        config = {
+            'enabled': True,
+            'sources': []  # Not used for ADB
+        }
+        monitor = LogMonitor(config, mode='adb', adb_device='emulator-5554')
+        
+        start = datetime(2025, 11, 21, 15, 0, 0)
+        end = datetime(2025, 11, 21, 16, 0, 0)
+        
+        entries = monitor.collect_logs(start, end)
+        
+        # Verify subprocess.run was called
+        assert mock_run.called
+        assert len(entries) == 3
+        assert entries[0].severity == 'info'
+        assert entries[1].severity == 'error'
+        assert entries[2].severity == 'warning'
+    
+    def test_adb_logcat_with_keywords(self, mocker):
+        """Test ADB log collection with keyword filtering."""
+        logcat_output = """11-21 15:30:45.123  1234  5678 I Tag1: Normal message
+11-21 15:30:46.456  1234  5679 E Tag2: ERROR occurred
+11-21 15:30:47.789  1235  5680 W Tag3: Another message
+11-21 15:30:48.012  1236  5681 I Tag4: CRITICAL failure
+"""
+        
+        mock_result = mocker.Mock()
+        mock_result.returncode = 0
+        mock_result.stdout = logcat_output
+        
+        mock_run = mocker.patch('src.monitors.log_monitor.subprocess.run', return_value=mock_result)
+        
+        config = {
+            'enabled': True,
+            'keywords': ['error', 'critical']
+        }
+        monitor = LogMonitor(config, mode='adb', adb_device='test')
+        
+        start = datetime(2025, 11, 21, 15, 0, 0)
+        end = datetime(2025, 11, 21, 16, 0, 0)
+        
+        entries = monitor.collect_logs(start, end)
+        
+        # Verify adb command was called
+        assert mock_run.called
+        call_args = mock_run.call_args[0][0]
+        
+        # Verify command includes logcat
+        assert 'adb' in call_args
+        assert 'logcat' in call_args
+
