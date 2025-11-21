@@ -941,7 +941,15 @@ class CLIMonitor:
             stdscr.refresh()
             
             key = stdscr.getch()
-            choice = chr(key) if key < 256 else ''
+            
+            if key == curses.KEY_RESIZE:
+                height, width = stdscr.getmaxyx()
+                continue
+                
+            if key == -1:
+                continue
+                
+            choice = chr(key) if 0 <= key < 256 else ''
             
             formats = []
             if choice == 'q' or choice == '':
@@ -964,8 +972,7 @@ class CLIMonitor:
             curses.curs_set(0)  # Hide cursor
         except:
             pass
-        stdscr.nodelay(1)    # Non-blocking input
-        stdscr.timeout(100)  # Restore timeout
+        # No need to restore anything - parent will handle it
         
         return formats
 
@@ -1015,10 +1022,11 @@ class CLIMonitor:
         """Run monitoring loop with curses for flicker-free updates."""
         # Note: self.running is already set to True in run_interactive()
         
-        # Configure curses
+        # Configure curses - the STANDARD way that works
         curses.curs_set(0)  # Hide cursor
-        stdscr.nodelay(1)   # Non-blocking input
-        stdscr.timeout(100) # Refresh timeout
+        stdscr.nodelay(0)   # BLOCKING mode
+        stdscr.timeout(100) # Wait 100ms for a key
+        stdscr.keypad(1)    # Handle special keys
         
         # Get screen size
         height, width = stdscr.getmaxyx()
@@ -1034,25 +1042,40 @@ class CLIMonitor:
         
         while self.running:
             try:
-                # Check for user input (Ctrl+C or 'q' to quit)
-                # Non-blocking: getch() returns -1 if no key pressed
+                # getch will wait UP TO 100ms for a key, then return -1
                 key = stdscr.getch()
-                if key == ord('q') or key == 3:  # 'q' or Ctrl+C
+                
+                # Handle terminal resize
+                if key == curses.KEY_RESIZE:
+                    height, width = stdscr.getmaxyx()
+                    self.term_height = height
+                    self.term_width = width
+                    stdscr.clear()  # Clear screen on resize
+                    last_update = 0  # Force immediate update
+                
+                # Handle keys
+                elif key == ord('q') or key == 3:  # 'q' or Ctrl+C
+                    self.running = False
                     break
                 elif key == ord('c'):  # CPU control menu
                     self._show_cpu_control_menu(stdscr)
-                    stdscr.clear()  # Clear after menu
-                    last_update = time.time()  # Reset timer after menu
+                    stdscr.clear()
+                    last_update = 0
                 elif key == ord('g'):  # GPU control menu
                     self._show_gpu_control_menu(stdscr)
-                    stdscr.clear()  # Clear after menu
-                    last_update = time.time()  # Reset timer after menu
+                    stdscr.clear()
+                    last_update = 0
                 elif key == ord('s'):  # Save data menu
                     formats = self._show_save_menu(stdscr)
                     if formats:
                         self._save_data_async(formats)
-                    stdscr.clear()  # Clear after menu
-                    last_update = time.time()  # Reset timer after menu
+                    stdscr.clear()
+                    last_update = 0
+                
+                # Check if it's time to update display
+                current_time = time.time()
+                if current_time - last_update < self.update_interval:
+                    continue
                 
                 # Get latest data from background thread (thread-safe)
                 with self.logging_lock:
@@ -1060,36 +1083,32 @@ class CLIMonitor:
                 
                 # Skip if no data available yet
                 if snapshot is None:
-                    time.sleep(0.05)
-                    continue
-                
-                # Check if it's time to update display
-                current_time = time.time()
-                if current_time - last_update < self.update_interval:
-                    # Don't sleep here - just continue to check for input again
-                    # This makes the loop more responsive to 'q' key presses
                     continue
                 
                 last_update = current_time
                 
-                # Clear screen and draw dashboard
-                stdscr.clear()
+                # Draw dashboard without clearing screen first (reduces flicker)
                 dashboard = self._format_dashboard(snapshot)
                 
                 # Draw each line
                 for i, line in enumerate(dashboard.split('\n')):
                     if i < height:
                         try:
+                            # Write line content
                             stdscr.addstr(i, 0, line[:width-1])
+                            # Clear rest of the line
+                            stdscr.clrtoeol()
                         except curses.error:
                             pass  # Ignore errors at screen edge
                 
+                # Clear any remaining lines at the bottom
+                stdscr.clrtobot()
+                
                 stdscr.refresh()
                 
-                # No sleep here - controlled by last_update timing
-                
             except KeyboardInterrupt:
-                break
+                self.running = False
+                return
         
         self.running = False
         
