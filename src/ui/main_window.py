@@ -4,7 +4,8 @@
 import sys
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QTabWidget, QLabel, QGroupBox, QGridLayout,
-                             QStatusBar, QAction, QMessageBox, QApplication)
+                             QStatusBar, QAction, QMessageBox, QApplication,
+                             QScrollArea, QFrame)
 from PyQt5.QtCore import QTimer, Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont
 
@@ -222,8 +223,19 @@ class MainWindow(QMainWindow):
     
     def create_overview_tab(self) -> QWidget:
         """Create overview tab with all system metrics."""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
+        # Main container for the tab
+        tab_widget = QWidget()
+        tab_layout = QVBoxLayout(tab_widget)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Scroll area to handle overflow
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        
+        # Content widget that holds all the actual UI elements
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
         
         # Info cards section
         self.cards_layout = QHBoxLayout()
@@ -312,9 +324,18 @@ class MainWindow(QMainWindow):
         # For LocalDataSource, it has a process_monitor attribute
         if hasattr(self.data_source, 'process_monitor') and self.data_source.process_monitor.enabled:
             self.process_table = ProcessTableWidget()
+            # Set a minimum height for the table to ensure it's usable
+            self.process_table.setMinimumHeight(200)
             layout.addWidget(self.process_table)
+            
+        # Add stretch to push everything up if there's extra space
+        layout.addStretch()
         
-        return widget
+        # Set content widget to scroll area
+        scroll_area.setWidget(content_widget)
+        tab_layout.addWidget(scroll_area)
+        
+        return tab_widget
     
     def add_gpu_ui(self):
         """Dynamically add GPU UI components when GPU is detected."""
