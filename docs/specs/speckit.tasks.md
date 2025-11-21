@@ -261,11 +261,11 @@ Tasks are organized by feature and priority. Each task includes:
 - Add comprehensive docstrings
 
 **Acceptance Criteria**:
-- [ ] LogMonitor loads configuration correctly
-- [ ] Timestamp parsing works for common formats
-- [ ] Keyword filtering functional
-- [ ] Log entry parsing extracts all fields
-- [ ] Code coverage >65%
+- [x] LogMonitor loads configuration correctly
+- [x] Timestamp parsing works for common formats
+- [x] Keyword filtering functional
+- [x] Log entry parsing extracts all fields
+- [x] Code coverage >65% (achieved 88%)
 
 **Files to Create**:
 - `src/monitors/log_monitor.py`
@@ -286,12 +286,12 @@ Tasks are organized by feature and priority. Each task includes:
 - Test with various log formats and sizes
 
 **Acceptance Criteria**:
-- [ ] Reads plain text logs correctly
-- [ ] Reads gzip-compressed logs correctly
-- [ ] Handles log rotation (syslog, syslog.1, syslog.2.gz)
-- [ ] Streams large files without loading entire file in memory
-- [ ] Context lines included when match found
-- [ ] Handles permission errors gracefully
+- [x] Reads plain text logs correctly
+- [x] Reads gzip-compressed logs correctly
+- [x] Handles log rotation (syslog, syslog.1, syslog.2.gz)
+- [x] Streams large files without loading entire file in memory
+- [ ] Context lines included when match found (not yet implemented)
+- [x] Handles permission errors gracefully
 
 **Files to Modify**:
 - `src/monitors/log_monitor.py`
@@ -313,12 +313,12 @@ Tasks are organized by feature and priority. Each task includes:
 - Document anonymization behavior
 
 **Acceptance Criteria**:
-- [ ] IP addresses replaced with xxx.xxx.xxx.xxx
-- [ ] Home directories replaced with /home/USER
-- [ ] Hostnames replaced with <hostname>
-- [ ] Anonymization can be disabled
-- [ ] Original data preserved if anonymization off
-- [ ] Unit tests cover all pattern types
+- [x] IP addresses replaced with xxx.xxx.xxx.xxx
+- [x] Home directories replaced with /home/USER
+- [x] Hostnames replaced with <hostname>
+- [x] Anonymization can be disabled
+- [x] Original data preserved if anonymization off
+- [x] Unit tests cover all pattern types
 
 **Files to Modify**:
 - `src/monitors/log_monitor.py`
@@ -339,11 +339,11 @@ Tasks are organized by feature and priority. Each task includes:
 - Test with various log formats containing PIDs
 
 **Acceptance Criteria**:
-- [ ] PIDs correctly extracted from logs
-- [ ] Correlation map built correctly
-- [ ] Handles logs without PIDs gracefully
-- [ ] Multiple PID formats supported
-- [ ] Unit tests cover various PID patterns
+- [x] PIDs correctly extracted from logs
+- [ ] Correlation map built correctly (not implemented yet)
+- [x] Handles logs without PIDs gracefully
+- [x] Multiple PID formats supported
+- [x] Unit tests cover various PID patterns
 
 **Files to Modify**:
 - `src/monitors/log_monitor.py`

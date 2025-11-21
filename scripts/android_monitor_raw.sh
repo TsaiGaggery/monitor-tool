@@ -582,9 +582,11 @@ collect_top_processes() {
             sub(/ .*/, "", short_name);   # Remove args
         }
         
-        # Escape quotes for JSON
-        gsub(/"/, "\\\"", short_name);
-        gsub(/"/, "\\\"", name);
+        # Escape special characters for JSON
+        gsub(/\\/, "\\\\", short_name);  # Backslashes first
+        gsub(/"/, "\\\"", short_name);   # Then quotes
+        gsub(/\\/, "\\\\", name);        # Backslashes first
+        gsub(/"/, "\\\"", name);         # Then quotes
         
         # Output JSON  
         printf "{\"type\":\"process\",\"pid\":%d,\"name\":\"%s\",\"cpu\":%.1f,\"mem\":%d,\"cmd\":\"%s\"}\n", 
