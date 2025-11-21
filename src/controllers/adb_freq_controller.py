@@ -188,6 +188,8 @@ class ADBFrequencyController:
             
         result = self._run_adb_command("set_cpu_epp", epp)
         return result is not None and result.startswith("OK:")
+
+    def get_cpu_freq_range(self) -> dict:
         """Get min/max frequency range for CPUs."""
         if not self.is_available:
             return {

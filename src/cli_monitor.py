@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from data_source import MonitorDataSource, LocalDataSource, AndroidDataSource, RemoteLinuxDataSource
 from storage import DataLogger, DataExporter
-from controllers import FrequencyController, ADBFrequencyController, SSHFrequencyController
+from controllers import FrequencyController, ADBFrequencyController
 from monitoring_snapshot import MonitoringSnapshot
 
 
@@ -77,29 +77,9 @@ class CLIMonitor:
                 self.freq_controller = None
                 print(f"⚠️  Android frequency control disabled (requires root)")
         elif isinstance(self.data_source, RemoteLinuxDataSource):
-            # Remote Linux system via SSH
-            from controllers import SSHFrequencyController
-            
-            ssh_freq_ctrl = SSHFrequencyController(
-                host=self.data_source.ssh_monitor.host,
-                port=self.data_source.ssh_monitor.port,
-                user=self.data_source.ssh_monitor.user,
-                password=self.data_source.ssh_monitor.password,
-                key_path=self.data_source.ssh_monitor.key_path
-            )
-            
-            # Only use if available (cpufreq support)
-            if ssh_freq_ctrl.is_available:
-                self.freq_controller = ssh_freq_ctrl
-                
-                if ssh_freq_ctrl.has_sudo:
-                    print(f"✅ SSH frequency control enabled (full access)")
-                else:
-                    print(f"⚠️  SSH frequency control enabled (read-only, no passwordless sudo)")
-                    print(f"    Press 'c' or 'g' to see setup instructions")
-            else:
-                self.freq_controller = None
-                print(f"⚠️  SSH frequency control disabled (no cpufreq support on remote)")
+            # Remote Linux via SSH - frequency control not supported yet
+            self.freq_controller = None
+            print(f"⚠️  Frequency control not supported for remote Linux")
         else:
             self.freq_controller = None
         
@@ -114,8 +94,12 @@ class CLIMonitor:
         # Track session start time for export
         self.session_start_time = None
         
-        # Session data exporter (for remote modes: Android/SSH)
-        self.data_exporter = DataExporter(data_source=self.data_source) if not isinstance(self.data_source, LocalDataSource) else None
+        # Session data exporter (always available for manual saves)
+        self.data_exporter = DataExporter(data_source=self.data_source)
+        
+        # Save status for UI
+        self.save_status_message = None
+        self.save_status_time = 0
         
         # Background logging thread
         self.logging_thread = None
@@ -432,7 +416,12 @@ class CLIMonitor:
         # Footer
         lines.append("".ljust(width))
         lines.append("=" * width)
-        footer = f"⏱  {self.update_interval}s | 'q' quit | 'c' CPU ctrl | 'g' GPU ctrl"
+        
+        # Show save status if active (within last 5 seconds)
+        if self.save_status_message and (time.time() - self.save_status_time < 5.0):
+            lines.append(f" {self.save_status_message}".ljust(width))
+            
+        footer = f"⏱  {self.update_interval}s | 'q' quit | 'c' CPU | 'g' GPU | 's' Save"
         lines.append(footer.ljust(width))
         
         # Pad to terminal height to prevent scrolling
@@ -494,7 +483,8 @@ class CLIMonitor:
                         )
                     
                     # Add to session exporter (for Android/SSH export)
-                    if self.data_exporter:
+                    # For LocalDataSource, we rely on SQLite DB to avoid double storage in memory
+                    if self.data_exporter and not isinstance(self.data_source, LocalDataSource):
                         self.data_exporter.add_sample(snapshot.to_dict())
                     
                     # Schedule next log time (prevents drift)
@@ -603,13 +593,6 @@ class CLIMonitor:
         governors = self.freq_controller.get_available_cpu_governors()
         current_gov = self.freq_controller.get_current_cpu_governor()
         
-        # Get EPP info if available
-        available_epp = []
-        current_epp = None
-        if hasattr(self.freq_controller, 'get_available_cpu_epp'):
-            available_epp = self.freq_controller.get_available_cpu_epp()
-            current_epp = self.freq_controller.get_current_cpu_epp()
-        
         while True:
             stdscr.clear()
             
@@ -625,13 +608,7 @@ class CLIMonitor:
                 stdscr.addstr(row, 2, f"Freq Range: {freq_range.get('scaling_min', 0):.0f} - {freq_range.get('scaling_max', 0):.0f} MHz")
                 row += 1
                 stdscr.addstr(row, 2, f"HW Limits: {freq_range.get('hardware_min', 0):.0f} - {freq_range.get('hardware_max', 0):.0f} MHz")
-                row += 1
-            
-            if current_epp:
-                stdscr.addstr(row, 2, f"Current EPP: {current_epp}")
-                row += 1
-            
-            row += 1
+                row += 2
             
             # Menu options
             stdscr.addstr(row, 2, "1. Set Governor")
@@ -642,9 +619,6 @@ class CLIMonitor:
             row += 1
             stdscr.addstr(row, 2, "4. Powersave Mode")
             row += 1
-            if available_epp:
-                stdscr.addstr(row, 2, "5. Set Energy Preference (EPP)")
-                row += 1
             stdscr.addstr(row, 2, "q. Back to Monitor")
             row += 2
             
@@ -682,12 +656,7 @@ class CLIMonitor:
                 else:
                     stdscr.addstr(row + 2, 2, "✗ Failed (check sudo permissions) (press any key)")
                 stdscr.refresh()
-                stdscr.refresh()
                 stdscr.getch()
-            elif choice == '5' and available_epp:
-                # Set EPP
-                self._set_epp_interactive(stdscr, available_epp)
-                current_epp = self.freq_controller.get_current_cpu_epp()
         
         # Restore settings
         try:
@@ -731,48 +700,6 @@ class CLIMonitor:
                     stdscr.addstr(row + 2, 2, f"✓ Governor set to {gov} (press any key)")
                 else:
                     stdscr.addstr(row + 2, 2, "✗ Failed to set governor (press any key)")
-            else:
-                stdscr.addstr(row + 2, 2, "✗ Invalid choice (press any key)")
-        except ValueError:
-            stdscr.addstr(row + 2, 2, "✗ Invalid input (press any key)")
-        
-        stdscr.refresh()
-        stdscr.refresh()
-        stdscr.getch()
-
-    def _set_epp_interactive(self, stdscr, available_epp):
-        """Interactive EPP selection."""
-        # Enable echo for input
-        curses.echo()
-        
-        height, width = stdscr.getmaxyx()
-        stdscr.clear()
-        
-        row = 2
-        stdscr.addstr(row, 2, "Available Energy Preferences:")
-        row += 1
-        
-        for i, epp in enumerate(available_epp, 1):
-            stdscr.addstr(row, 4, f"{i}. {epp}")
-            row += 1
-        
-        row += 1
-        stdscr.addstr(row, 2, "Select preference (number): ")
-        stdscr.refresh()
-        
-        choice = stdscr.getstr(row, 28, 5).decode('utf-8').strip()
-        
-        # Disable echo
-        curses.noecho()
-        
-        try:
-            idx = int(choice) - 1
-            if 0 <= idx < len(available_epp):
-                epp = available_epp[idx]
-                if self.freq_controller.set_cpu_epp(epp):
-                    stdscr.addstr(row + 2, 2, f"✓ EPP set to {epp} (press any key)")
-                else:
-                    stdscr.addstr(row + 2, 2, "✗ Failed to set EPP (press any key)")
             else:
                 stdscr.addstr(row + 2, 2, "✗ Invalid choice (press any key)")
         except ValueError:
@@ -975,6 +902,114 @@ class CLIMonitor:
         stdscr.refresh()
         stdscr.getch()
 
+    def _show_save_menu(self, stdscr):
+        """Show save menu."""
+        # Save current settings
+        try:
+            curses.curs_set(1)  # Show cursor
+        except:
+            pass
+        
+        stdscr.nodelay(0)    # Blocking input
+        stdscr.timeout(-1)   # Wait indefinitely
+        
+        height, width = stdscr.getmaxyx()
+        
+        while True:
+            stdscr.clear()
+            
+            # Title
+            title = "=== Save Data Menu ==="
+            stdscr.addstr(0, (width - len(title)) // 2, title)
+            
+            row = 2
+            stdscr.addstr(row, 2, "Select format to save:")
+            row += 2
+            
+            stdscr.addstr(row, 2, "1. Save All (CSV, JSON, HTML)")
+            row += 1
+            stdscr.addstr(row, 2, "2. Save to JSON")
+            row += 1
+            stdscr.addstr(row, 2, "3. Save to CSV")
+            row += 1
+            stdscr.addstr(row, 2, "4. Save to HTML")
+            row += 1
+            stdscr.addstr(row, 2, "q. Cancel")
+            row += 2
+            
+            stdscr.addstr(row, 2, "Choice: ")
+            stdscr.refresh()
+            
+            key = stdscr.getch()
+            choice = chr(key) if key < 256 else ''
+            
+            formats = []
+            if choice == 'q' or choice == '':
+                break
+            elif choice == '1':
+                formats = ['csv', 'json', 'html']
+                break
+            elif choice == '2':
+                formats = ['json']
+                break
+            elif choice == '3':
+                formats = ['csv']
+                break
+            elif choice == '4':
+                formats = ['html']
+                break
+        
+        # Restore settings
+        try:
+            curses.curs_set(0)  # Hide cursor
+        except:
+            pass
+        stdscr.nodelay(1)    # Non-blocking input
+        stdscr.timeout(100)  # Restore timeout
+        
+        return formats
+
+    def _save_data_async(self, formats: List[str]):
+        """Save data in a background thread."""
+        def save_worker():
+            # Redirect stdout to prevent messing up curses display
+            import io
+            from contextlib import redirect_stdout
+            
+            f = io.StringIO()
+            try:
+                with redirect_stdout(f):
+                    self.save_status_message = "💾 Saving data..."
+                    self.save_status_time = time.time()
+                    
+                    saved_files = []
+                    
+                    # Use local time for filename timestamp
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    
+                    for fmt in formats:
+                        filename = f"monitoring_data_{timestamp}.{fmt}"
+                        if fmt == 'csv':
+                            path = self.data_exporter.export_csv(filename=filename)
+                            saved_files.append(os.path.basename(path))
+                        elif fmt == 'json':
+                            path = self.data_exporter.export_json(filename=filename)
+                            saved_files.append(os.path.basename(path))
+                        elif fmt == 'html':
+                            path = self.data_exporter.export_html(filename=filename)
+                            saved_files.append(os.path.basename(path))
+                    
+                    if saved_files:
+                        self.save_status_message = f"✓ Saved: {', '.join(saved_files)}"
+                    else:
+                        self.save_status_message = "⚠️ No data saved"
+                    self.save_status_time = time.time()
+                
+            except Exception as e:
+                self.save_status_message = f"❌ Save failed: {str(e)}"
+                self.save_status_time = time.time()
+        
+        threading.Thread(target=save_worker, daemon=True).start()
     
     def _run_curses(self, stdscr, export_format: Optional[str] = None, export_output: Optional[str] = None):
         """Run monitoring loop with curses for flicker-free updates."""
@@ -1010,6 +1045,12 @@ class CLIMonitor:
                     last_update = time.time()  # Reset timer after menu
                 elif key == ord('g'):  # GPU control menu
                     self._show_gpu_control_menu(stdscr)
+                    stdscr.clear()  # Clear after menu
+                    last_update = time.time()  # Reset timer after menu
+                elif key == ord('s'):  # Save data menu
+                    formats = self._show_save_menu(stdscr)
+                    if formats:
+                        self._save_data_async(formats)
                     stdscr.clear()  # Clear after menu
                     last_update = time.time()  # Reset timer after menu
                 
