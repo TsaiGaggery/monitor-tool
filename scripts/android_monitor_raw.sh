@@ -504,25 +504,95 @@ get_disk_raw() {
 collect_top_processes() {
     local ts=$1
     
-    # Get top 5 processes by CPU usage
-    # Format: pid, pcpu, rss, state, comm
-    # Use grep -v to skip header, sort by CPU (2nd col), take top 5
-    ps -A -o pid,pcpu,rss,s,comm | grep -v PID | sort -rn -k2 | head -n 5 | while read -r pid pcpu rss state comm; do
-        # Escape quotes in comm for SQL
-        safe_comm=$(echo "$comm" | sed "s/'/''/g")
+    # Use top command for accurate CPU% (not ps which causes high CPU usage)
+    # -b: batch mode, -n 1: one iteration, -m 10: max 10 processes  
+    # Parse top output using simpler awk (Android awk doesn't support 3-arg match)
+    top -b -n 1 -m 10 | awk '
+    BEGIN { header_found=0; count=0; }
+    # Find header line containing PID
+    /^[ ]*PID/ { header_found=1; next; }
+    # Process data lines after header (starts with number)
+    header_found && /^[ ]*[0-9]+/ && count < 5 {
+        # Format: PID USER PR NI VIRT RES SHR S[%CPU] %MEM TIME+ ARGS...
+        # Example: 7633 u10_system 20 0 14G 171M 121M S 3.8 1.0 1:21.28 com.android.desktop.network.debugtool
+        pid = $1;
+        res_str = $6;  # RES like "4.7M", "171M", "10G"
+        state = substr($8, 1, 1);  # First char of S or S[%CPU] column
         
-        # Insert into process_data
-        # Note: cmdline is same as name (comm) on Android usually
-        # num_threads set to 0 as it's hard to get efficiently in one pass
-        if [ "$ENABLE_DB" -eq 1 ]; then
-            sqlite3 "$DB_PATH" "INSERT INTO process_data (timestamp, pid, name, cpu_percent, memory_rss, cmdline, status, num_threads) VALUES ($ts, $pid, '$safe_comm', $pcpu, $rss, '$safe_comm', '$state', 0);"
-        fi
+        # Parse CPU% - column 9 is %MEM, need to find CPU which might be in col 8 or 9
+        # If col 9 is a plain number (e.g., "3.8"), it might be CPU or %MEM
+        # Android top format: S[%CPU] is col 8, but shown as just "S" or "R" with CPU next
+        # Actually: col 8 is "S", col 9 is likely the CPU% (after the [ part is dropped)
+        # Let me check if $9 looks like CPU (small number with decimal)
+        cpu_pct = 0;
+        if ($9 ~ /^[0-9]+\.[0-9]+$/ && $9 < 100) {
+            cpu_pct = $9;
+        } else if ($8 ~/[0-9]/) {
+            # Extract number from S[7.6] format
+            tmp = $8;
+            gsub(/[^0-9.]/, "", tmp);
+            if (tmp != "") cpu_pct = tmp;
+        }
         
-        # Output JSON for realtime display (one line per process)
-        # Format: {"type":"process","pid":...,"name":"...","cpu":...,"mem":...,"cmd":"..."}
-        printf '{"type":"process","pid":%d,"name":"%s","cpu":%.1f,"mem":%d,"cmd":"%s"}\n' \
-            "$pid" "$safe_comm" "$pcpu" "$rss" "$safe_comm"
-    done
+        # Parse RES (memory) - extract number and unit
+        mem_kb = 0;
+        tmp_res = res_str;
+        if (tmp_res ~ /G$/) {
+            gsub(/[^0-9.]/, "", tmp_res);
+            mem_kb = tmp_res * 1024 * 1024;
+        } else if (tmp_res ~ /M$/) {
+            gsub(/[^0-9.]/, "", tmp_res);
+            mem_kb = tmp_res * 1024;
+        } else if (tmp_res ~ /K$/) {
+            gsub(/[^0-9.]/, "", tmp_res);
+            mem_kb = tmp_res;
+        }
+        
+        # ARGS is everything from column 12 onwards (after TIME+ which is col 11)
+        name = "";
+        for (i=12; i<=NF; i++) {
+            name = name $i " ";
+        }
+        # Trim whitespace
+        gsub(/^[ \t]+|[ \t]+$/, "", name);
+        
+        # Skip if no name extracted
+        if (name == "") next;
+        
+        # Extract short name from full command
+        short_name = name;
+        # Kernel threads: [kworker/u25:1] -> kworker
+        if (name ~ /^\[/) {
+            short_name = name;
+            sub(/\[/, "", short_name);
+            sub(/\/.*/, "", short_name);
+            sub(/].*/, "", short_name);
+        }
+        # Paths: /system/bin/surfaceflinger args -> surfaceflinger
+        else if (name ~ /^\//) {
+            short_name = name;
+            sub(/.*\//, "", short_name);  # Remove path
+            sub(/ .*/, "", short_name);   # Remove args
+        }
+        # Android apps: com.android.settings:something -> settings
+        else if (name ~ /\./) {
+            short_name = name;
+            sub(/.*\./, "", short_name);  # Get last component
+            sub(/:.*/, "", short_name);   # Remove :suffix
+            sub(/ .*/, "", short_name);   # Remove args
+        }
+        
+        # Escape quotes for JSON
+        gsub(/"/, "\\\"", short_name);
+        gsub(/"/, "\\\"", name);
+        
+        # Output JSON  
+        printf "{\"type\":\"process\",\"pid\":%d,\"name\":\"%s\",\"cpu\":%.1f,\"mem\":%d,\"cmd\":\"%s\"}\n", 
+            pid, short_name, cpu_pct, int(mem_kb * 1024), name;
+        
+        count++;
+    }
+    '
 }
 
 # Main monitoring loop

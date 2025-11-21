@@ -18,21 +18,22 @@ class ProcessTableWidget(QWidget):
         
         # Title
         self.title_label = QLabel("Top Processes")
-        self.title_label.setAlignment(Qt.AlignCenter)
-        self.title_label.setStyleSheet("font-weight: bold; font-size: 12px; margin-bottom: 5px;")
+        self.title_label.setAlignment(Qt.AlignLeft)
+        self.title_label.setStyleSheet("font-weight: bold; font-size: 32px; margin-bottom: 10px; padding-left: 2px;")
         layout.addWidget(self.title_label)
         
         # Table
         self.table = QTableWidget()
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["PID", "Name", "CPU %", "Mem (MB)"])
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["PID", "Name", "CPU %", "Mem (MB)", "Command"])
         
         # Configure header
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # PID
-        header.setSectionResizeMode(1, QHeaderView.Stretch)           # Name
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # Name
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # CPU
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # Mem
+        header.setSectionResizeMode(4, QHeaderView.Stretch)           # Command
         
         # Hide vertical header (row numbers)
         self.table.verticalHeader().setVisible(False)
@@ -40,6 +41,22 @@ class ProcessTableWidget(QWidget):
         # Read-only
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        
+        # Set much larger font for table (2x) with better row height
+        self.table.setStyleSheet("""
+            QTableWidget {
+                font-size: 24px;
+            }
+            QTableWidget::item {
+                padding: 8px;
+            }
+            QHeaderView::section {
+                font-size: 24px;
+                font-weight: bold;
+                padding: 10px;
+            }
+        """)
+        self.table.verticalHeader().setDefaultSectionSize(50)
         
         layout.addWidget(self.table)
         
@@ -103,7 +120,7 @@ class ProcessTableWidget(QWidget):
             
             # Name
             name_item = QTableWidgetItem(str(name))
-            name_item.setToolTip(str(cmdline))
+            name_item.setToolTip(f"Process: {name}")
             self.table.setItem(row, 1, name_item)
             
             # CPU
@@ -117,8 +134,21 @@ class ProcessTableWidget(QWidget):
             mem_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.table.setItem(row, 3, mem_item)
             
+            # Command line (full command with arguments)
+            # cmdline should contain the full command with args, not just the name
+            # If cmdline is empty or same as name, show name instead
+            if cmdline and str(cmdline).strip() and str(cmdline) != str(name):
+                cmd_display = str(cmdline)[:200]  # Limit to 200 chars for display
+            else:
+                # Fallback to name if cmdline is missing/empty
+                cmd_display = str(name)
+            
+            cmd_item = QTableWidgetItem(cmd_display)
+            cmd_item.setToolTip(str(cmdline) if cmdline else str(name))  # Full command on hover
+            self.table.setItem(row, 4, cmd_item)
+            
             # Color coding
             bg_color = self.colors.get(severity, self.colors['normal'])
-            for col in range(4):
+            for col in range(5):
                 item = self.table.item(row, col)
                 item.setBackground(QBrush(bg_color))

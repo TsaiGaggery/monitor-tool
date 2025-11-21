@@ -641,23 +641,60 @@ get_disk_stats() {
 collect_top_processes() {
     local ts=$1
     
-    # Get top 5 processes by CPU usage
-    # Format: pid, pcpu, rss, state, nlwp, args
-    # Use --no-headers to skip header
-    ps -eo pid,pcpu,rss,state,nlwp,args --sort=-pcpu --no-headers | head -n 5 | while read -r pid pcpu rss state nlwp args; do
-        # Extract name from args (first word, basename)
-        name=$(basename "${args%% *}")
-        # Escape quotes in args and name for SQL
-        safe_args=$(echo "$args" | sed "s/'/''/g")
+    # Use top in batch mode - lighter than ps for getting top processes
+    # -b: batch mode, -n 1: one iteration, -w 512: wide output for full command
+    top -b -n 1 -w 512 | awk '
+        /^[ ]*PID/ { header=1; next }
+        header && NF >= 12 {
+            # Print: PID CPU% MEM_RES STATE COMMAND
+            # Fields: 1=PID, 9=%CPU, 6=RES, 8=S, 12=COMMAND
+            print $1, $9, $6, $8, substr($0, index($0, $12))
+        }
+    ' | sort -k2 -rn | head -n 5 | while read -r pid cpu res state cmdshort; do
+        
+        # Convert RES memory to KB
+        rss="$res"
+        if [[ "$res" =~ ^([0-9.]+)g$ ]]; then
+            rss=$(awk "BEGIN {printf \"%.0f\", ${BASH_REMATCH[1]} * 1024 * 1024}")
+        elif [[ "$res" =~ ^([0-9.]+)m$ ]]; then
+            rss=$(awk "BEGIN {printf \"%.0f\", ${BASH_REMATCH[1]} * 1024}")
+        elif [[ "$res" =~ ^([0-9]+)$ ]]; then
+            # Plain number is KB
+            rss="$res"
+        else
+            # Fallback
+            rss=$(echo "$res" | tr -d 'a-z' | tr -d '+')
+            [ -z "$rss" ] && rss=0
+        fi
+        
+        # Get full cmdline from /proc
+        cmdline=$(cat /proc/$pid/cmdline 2>/dev/null | tr '\0' ' ' | sed 's/ $//')
+        
+        # If cmdline is empty (kernel thread), use cmdshort
+        if [ -z "$cmdline" ]; then
+            cmdline="[$cmdshort]"
+        fi
+        
+        # Extract name from cmdline
+        name="$cmdshort"
+        if [[ "$cmdline" == /* ]]; then
+            name=$(basename "${cmdline%% *}")
+        fi
+        
+        # Get thread count from /proc
+        nlwp=$(grep "^Threads:" /proc/$pid/status 2>/dev/null | awk '{print $2}')
+        [ -z "$nlwp" ] && nlwp=1
+        
+        # Escape quotes for SQL
+        safe_args=$(echo "$cmdline" | sed "s/'/''/g")
         safe_name=$(echo "$name" | sed "s/'/''/g")
         
         # Insert into process_data
-        sqlite3 "$DB_PATH" "INSERT INTO process_data (timestamp, pid, name, cpu_percent, memory_rss, cmdline, status, num_threads) VALUES ($ts, $pid, '$safe_name', $pcpu, $rss, '$safe_args', '$state', $nlwp);" 2>>/tmp/monitor_db_errors.log
+        sqlite3 "$DB_PATH" "INSERT INTO process_data (timestamp, pid, name, cpu_percent, memory_rss, cmdline, status, num_threads) VALUES ($ts, $pid, '$safe_name', $cpu, $rss, '$safe_args', '$state', $nlwp);" 2>>/tmp/monitor_db_errors.log
         
-        # Output JSON for realtime display (one line per process)
-        # Format: {"type":"process","pid":...,"name":"...","cpu":...,"mem":...,"cmd":"..."}
+        # Output JSON for realtime display
         printf '{"type":"process","pid":%d,"name":"%s","cpu":%.1f,"mem":%d,"cmd":"%s"}\n' \
-            "$pid" "$safe_name" "$pcpu" "$rss" "$safe_args"
+            "$pid" "$safe_name" "$cpu" "$rss" "$safe_args"
     done
 }
 

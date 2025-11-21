@@ -26,7 +26,8 @@ class TemperatureBar(QWidget):
         
         # Label
         self.label = QLabel(f"{label}:")
-        self.label.setMinimumWidth(50)
+        self.label.setMinimumWidth(80)
+        self.label.setStyleSheet("font-size: 24px; font-weight: 500;")
         layout.addWidget(self.label)
         
         # Progress bar
@@ -35,13 +36,15 @@ class TemperatureBar(QWidget):
         self.bar.setMaximum(max_temp)
         self.bar.setValue(0)
         self.bar.setTextVisible(False)
-        self.bar.setMaximumHeight(20)
+        self.bar.setMinimumHeight(36)
+        self.bar.setMaximumHeight(36)
         layout.addWidget(self.bar, stretch=1)
         
         # Temperature value label
         self.value_label = QLabel("-")
-        self.value_label.setMinimumWidth(60)
+        self.value_label.setMinimumWidth(100)
         self.value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.value_label.setStyleSheet("font-size: 24px; font-weight: 500;")
         layout.addWidget(self.value_label)
     
     def update_temperature(self, temp: float):
@@ -103,7 +106,8 @@ class TemperaturePanel(QWidget):
         
         # Title
         title = QLabel("🌡️ Temperature Monitoring")
-        title.setStyleSheet("font-weight: bold; font-size: 13px;")
+        title.setStyleSheet("font-weight: bold; font-size: 32px;")
+        title.setAlignment(Qt.AlignLeft)
         layout.addWidget(title)
         
         # Temperature bars

@@ -62,9 +62,12 @@ class ProcessMonitor:
         self._process_cache: List[ProcessInfo] = []
         self._lock = threading.Lock()
         
-        # Cache for SSH process calculation (pid -> {utime, stime, timestamp})
+        # Cache for SSH/ADB process calculation (pid -> {utime, stime, timestamp})
         self._prev_ssh_proc_stats = {}
         self._prev_ssh_total_ticks = 0
+        self._prev_adb_proc_stats = {}
+        self._prev_adb_total_ticks = 0
+        self._adb_use_proc = None  # None=unknown, True=use /proc, False=use top
     
     def get_top_processes(self) -> List[ProcessInfo]:
         """
@@ -265,24 +268,46 @@ class ProcessMonitor:
             # We do this here because we need to fetch cmdline for them
             top_processes = self._sort_processes(processes)[:self.process_count]
             
-            # Fetch cmdline for top processes
+            # Fetch cmdlines for top processes using /proc/*/cmdline (avoids heavy ps command)
             if top_processes:
                 pids = [str(p.pid) for p in top_processes]
-                # Use ps to get args for these PIDs
-                # ps -p 123,456 -o pid,args
-                cmd_args = f"ps -p {','.join(pids)} -o pid,args --no-headers"
-                stdin, stdout, stderr = self.ssh_client.exec_command(cmd_args)
                 
-                arg_map = {}
-                for line in stdout.readlines():
-                    parts = line.strip().split(None, 1)
-                    if len(parts) == 2:
-                        arg_map[int(parts[0])] = parts[1]
+                # Read /proc/PID/cmdline for each process - much lighter than ps
+                # Format: echo marker, then cmdline with \0 converted to space
+                cmdline_cmd = " ".join([f"echo 'PID{pid}:' && cat /proc/{pid}/cmdline 2>/dev/null | tr '\\0' ' ' && echo;" for pid in pids])
+                stdin, stdout, stderr = self.ssh_client.exec_command(cmdline_cmd)
                 
-                # Update cmdline in top processes
+                # Parse output - format is: "PIDxxx:" followed by cmdline on next line
+                cmdline_map = {}
+                lines = stdout.read().decode('utf-8').splitlines()
+                
+                i = 0
+                while i < len(lines):
+                    line = lines[i].strip()
+                    if line.startswith('PID') and ':' in line:
+                        try:
+                            pid = int(line[3:line.index(':')])
+                            # Next line is the cmdline
+                            if i + 1 < len(lines):
+                                full_cmd = lines[i + 1].strip()
+                                if full_cmd:
+                                    cmdline_map[pid] = full_cmd
+                            i += 2  # Skip to next PID marker
+                        except (ValueError, IndexError):
+                            i += 1
+                    else:
+                        i += 1
+                
+                # Update cmdlines and extract proper names
                 for p in top_processes:
-                    if p.pid in arg_map:
-                        p.cmdline = arg_map[p.pid]
+                    if p.pid in cmdline_map:
+                        full_cmd = cmdline_map[p.pid]
+                        p.cmdline = full_cmd
+                        
+                        # Extract better name from full command
+                        # For native binaries: /usr/bin/python3 -> python3
+                        if full_cmd.startswith('/'):
+                            p.name = full_cmd.split('/')[-1].split()[0]
             
             return top_processes
                     
@@ -291,7 +316,205 @@ class ProcessMonitor:
             return []
 
     def _get_adb_processes(self) -> List[ProcessInfo]:
-        """Get processes from Android device via ADB."""
+        """
+        Get processes from Android device via ADB using top command.
+        
+        Uses top for accurate real-time CPU% readings. The /proc method had issues
+        with CPU% calculation accuracy and update frequency on Android.
+        """
+        if not self.adb_device:
+            return []
+        
+        # Always use top for Android - it's more accurate for CPU%
+        return self._get_adb_processes_top()
+    
+    def _get_adb_processes_proc(self) -> List[ProcessInfo]:
+        """Get processes from Android using /proc filesystem (faster, more accurate)."""
+        processes = []
+        now = datetime.now()
+        
+        try:
+            # Fetch all data in one command (minimize ADB latency)
+            # 1. Page size, 2. CPU count, 3. Total CPU stats, 4. All process stats
+            cmd = ["adb", "-s", self.adb_device, "shell", 
+                   "getconf PAGESIZE; grep -c '^cpu[0-9]' /proc/stat; cat /proc/stat | head -n 1; cat /proc/[0-9]*/stat 2>/dev/null"]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+            if result.returncode != 0:
+                return []
+            
+            lines = result.stdout.splitlines()
+            if len(lines) < 4:
+                return []
+            
+            # Parse header info
+            try:
+                page_size = int(lines[0].strip())
+                cpu_count = int(lines[1].strip())
+                
+                cpu_line = lines[2].split()
+                if cpu_line[0] == 'cpu':
+                    total_ticks = sum(int(x) for x in cpu_line[1:])
+                else:
+                    total_ticks = 0
+            except ValueError:
+                return []
+            
+            # Parse process stats
+            curr_proc_stats = {}
+            
+            for line in lines[3:]:
+                try:
+                    # Handle 'comm' which can contain spaces and parentheses
+                    rparen_idx = line.rfind(')')
+                    if rparen_idx == -1:
+                        continue
+                    
+                    parts_after = line[rparen_idx+2:].split()
+                    lparen_idx = line.find('(')
+                    pid = int(line[:lparen_idx])
+                    comm = line[lparen_idx+1:rparen_idx]
+                    
+                    # Fields after comm (0-indexed in parts_after):
+                    # 0: state, 11: utime, 12: stime, 17: num_threads, 20: vsize, 21: rss
+                    state = parts_after[0]
+                    utime = int(parts_after[11])
+                    stime = int(parts_after[12])
+                    num_threads = int(parts_after[17])
+                    vsize = int(parts_after[20])
+                    rss_pages = int(parts_after[21])
+                    
+                    curr_proc_stats[pid] = {
+                        'name': comm,
+                        'state': state,
+                        'utime': utime,
+                        'stime': stime,
+                        'total_time': utime + stime,
+                        'threads': num_threads,
+                        'vsize': vsize,
+                        'rss': rss_pages * page_size
+                    }
+                except (ValueError, IndexError):
+                    continue
+            
+            # Calculate CPU usage
+            if self._prev_adb_total_ticks:
+                total_delta = total_ticks - self._prev_adb_total_ticks
+                
+                if total_delta > 0:
+                    for pid, curr in curr_proc_stats.items():
+                        cpu_percent = 0.0
+                        
+                        if pid in self._prev_adb_proc_stats:
+                            prev = self._prev_adb_proc_stats[pid]
+                            proc_delta = curr['total_time'] - prev['total_time']
+                            
+                            # Normalize to 100% per core
+                            cpu_percent = (proc_delta * 100.0 * cpu_count) / total_delta
+                            cpu_percent = max(0.0, cpu_percent)
+                        
+                        proc = ProcessInfo(
+                            pid=pid,
+                            name=curr['name'],
+                            cpu_percent=cpu_percent,
+                            memory_rss=curr['rss'],
+                            memory_vms=curr['vsize'],
+                            cmdline=curr['name'],  # Placeholder
+                            status=curr['state'],
+                            num_threads=curr['threads'],
+                            create_time=0.0,
+                            timestamp=now
+                        )
+                        processes.append(proc)
+            
+            # Update cache
+            self._prev_adb_proc_stats = curr_proc_stats
+            self._prev_adb_total_ticks = total_ticks
+            
+            # First run - return processes with 0 CPU
+            if not processes and curr_proc_stats:
+                for pid, curr in curr_proc_stats.items():
+                    processes.append(ProcessInfo(
+                        pid=pid,
+                        name=curr['name'],
+                        cpu_percent=0.0,
+                        memory_rss=curr['rss'],
+                        memory_vms=curr['vsize'],
+                        cmdline=curr['name'],
+                        status=curr['state'],
+                        num_threads=curr['threads'],
+                        create_time=0.0,
+                        timestamp=now
+                    ))
+            
+            # Sort and get top N
+            top_processes = self._sort_processes(processes)[:self.process_count]
+            
+            # Fetch full cmdlines for top processes using /proc/*/cmdline (more accurate than ps)
+            if top_processes:
+                pids = [str(p.pid) for p in top_processes]
+                
+                # Read /proc/PID/cmdline for each process to get full command with arguments
+                # Format: cat /proc/PID/cmdline outputs args separated by \0, we convert to space
+                cmdline_cmd = " ".join([f"echo 'PID{pid}:' && cat /proc/{pid}/cmdline 2>/dev/null | tr '\\0' ' ' && echo;" for pid in pids])
+                cmdline_result = subprocess.run(
+                    ["adb", "-s", self.adb_device, "shell", cmdline_cmd],
+                    capture_output=True, text=True, timeout=2
+                )
+                
+                if cmdline_result.returncode == 0:
+                    # Parse the output - format is: "PIDxxx:" followed by cmdline on next line
+                    cmdline_map = {}
+                    lines = cmdline_result.stdout.splitlines()
+                    
+                    i = 0
+                    while i < len(lines):
+                        line = lines[i].strip()
+                        if line.startswith('PID') and ':' in line:
+                            try:
+                                pid = int(line[3:line.index(':')])
+                                # Next line is the cmdline
+                                if i + 1 < len(lines):
+                                    full_cmd = lines[i + 1].strip()
+                                    if full_cmd:
+                                        cmdline_map[pid] = full_cmd
+                                i += 2  # Skip to next PID marker
+                            except (ValueError, IndexError):
+                                i += 1
+                        else:
+                            i += 1
+                    
+                    # Update cmdlines and extract proper names
+                    for proc in top_processes:
+                        if proc.pid in cmdline_map:
+                            full_cmd = cmdline_map[proc.pid]
+                            proc.cmdline = full_cmd
+                            
+                            # Extract better name from full command
+                            # For kernel threads: [kworker/R-tpm_d] -> kworker/R-tpm_d (won't have /proc/cmdline)
+                            if full_cmd.startswith('[') and full_cmd.endswith(']'):
+                                proc.name = full_cmd[1:-1]
+                            # For native binaries: /system/bin/surfaceflinger -> surfaceflinger
+                            elif full_cmd.startswith('/'):
+                                proc.name = full_cmd.split('/')[-1].split()[0]
+                            # For Android apps: com.android.chrome:privileged_process1 -> chrome
+                            elif '.' in full_cmd or ':' in full_cmd:
+                                base = full_cmd.split()[0].split(':')[0]  # Get first word, remove service suffix
+                                if '.' in base:
+                                    proc.name = base.split('.')[-1]
+                                else:
+                                    proc.name = base
+            
+            return top_processes
+            
+        except Exception as e:
+            print(f"Error fetching ADB processes via /proc: {e}")
+            # Fallback to top on error
+            self._adb_use_proc = False
+            return self._get_adb_processes_top()
+    
+    def _get_adb_processes_top(self) -> List[ProcessInfo]:
+        """Get processes from Android device via top command (fallback method)."""
         if not self.adb_device:
             return []
             
@@ -322,13 +545,21 @@ class ProcessMonitor:
             col_map = {}
             
             for i, line in enumerate(lines):
-                if "PID" in line and "USER" in line:
+                if "PID" in line and ("USER" in line or "ARGS" in line):
                     header_idx = i
                     # Parse headers to find column indices
-                    # Example: PID USER PR NI VIRT RES SHR S %CPU %MEM TIME+ ARGS
+                    # Example: PID USER PR NI VIRT RES SHR S[%CPU] %MEM TIME+ ARGS
+                    # Or: PID USER PR NI VIRT RES SHR S %CPU %MEM TIME+ COMMAND
                     headers = line.split()
                     for j, h in enumerate(headers):
-                        col_map[h.replace('%', '').strip()] = j
+                        # Handle S[%CPU] format (state+cpu combined)
+                        if 'CPU' in h:
+                            col_map['CPU'] = j
+                        if 'MEM' in h:
+                            col_map['MEM'] = j
+                        # Store all headers
+                        clean_h = h.replace('%', '').replace('[', '').replace(']', '').strip()
+                        col_map[clean_h] = j
                     break
             
             if header_idx == -1:
@@ -341,43 +572,39 @@ class ProcessMonitor:
                     
                 try:
                     parts = line.split()
-                    if len(parts) < len(col_map):
+                    if len(parts) < 10:  # Need at least: PID USER PR NI VIRT RES SHR S CPU MEM
                         continue
-                        
-                    # Extract fields using column map
-                    pid = int(parts[col_map.get('PID', 0)])
                     
-                    # Name/Command is usually the last part(s)
-                    # In toybox top, ARGS/COMMAND is last
-                    cmd_idx = col_map.get('ARGS', col_map.get('COMMAND', -1))
-                    if cmd_idx != -1:
-                        cmdline = " ".join(parts[cmd_idx:])
-                        name = parts[cmd_idx].split('/')[-1] # Simple name
-                    else:
-                        cmdline = parts[-1]
-                        name = cmdline
-                        
-                    # CPU
-                    cpu_idx = col_map.get('CPU', -1)
-                    cpu_percent = float(parts[cpu_idx]) if cpu_idx != -1 else 0.0
+                    # Fixed column positions based on Android top format:
+                    # PID USER PR NI VIRT RES SHR S[%CPU] %MEM TIME+ ARGS
+                    # When split: PID USER PR NI VIRT RES SHR S CPU MEM TIME ARGS...
+                    pid = int(parts[0])
+                    # State is at index 7, CPU at index 8
+                    cpu_percent = float(parts[8]) if len(parts) > 8 else 0.0
                     
-                    # Memory (RES/RSS)
-                    # Values can be 100M, 2G, 400K, or just bytes
+                    # Memory (RES/RSS) is at index 5
                     def parse_mem(val_str):
                         val_str = val_str.upper()
                         mult = 1
                         if val_str.endswith('G'): mult = 1024*1024*1024; val_str = val_str[:-1]
                         elif val_str.endswith('M'): mult = 1024*1024; val_str = val_str[:-1]
                         elif val_str.endswith('K'): mult = 1024; val_str = val_str[:-1]
-                        return int(float(val_str) * mult)
+                        try:
+                            return int(float(val_str) * mult)
+                        except:
+                            return 0
 
-                    res_idx = col_map.get('RES', col_map.get('RSS', -1))
-                    memory_rss = parse_mem(parts[res_idx]) if res_idx != -1 else 0
+                    memory_rss = parse_mem(parts[5]) if len(parts) > 5 else 0  # RES
+                    memory_vms = parse_mem(parts[4]) if len(parts) > 4 else 0  # VIRT
+                    status = parts[7] if len(parts) > 7 else '?'
                     
-                    virt_idx = col_map.get('VIRT', col_map.get('VSZ', -1))
-                    memory_vms = parse_mem(parts[virt_idx]) if virt_idx != -1 else 0
-                    
-                    status = parts[col_map.get('S', -1)] if 'S' in col_map else '?'
+                    # TIME+ is at index 10, ARGS start at index 11
+                    cmdline = " ".join(parts[11:]) if len(parts) > 11 else "unknown"
+                    # Extract process name from command
+                    if '/' in cmdline:
+                        name = cmdline.split('/')[-1].split()[0] if cmdline else "unknown"
+                    else:
+                        name = cmdline.split()[0] if cmdline else "unknown"
                     
                     proc = ProcessInfo(
                         pid=pid,
@@ -395,6 +622,67 @@ class ProcessMonitor:
                     
                 except (ValueError, IndexError):
                     continue
+            
+            # Enhance cmdline with full command from /proc for top processes
+            # Sort first to get top N, then fetch their full cmdlines
+            if processes:
+                processes = self._sort_processes(processes)[:self.process_count]
+                
+                # Fetch full command lines using /proc/*/cmdline instead of ps
+                pids = [str(p.pid) for p in processes]
+                cmdline_cmd = " ".join([f"echo 'PID{pid}:' && cat /proc/{pid}/cmdline 2>/dev/null | tr '\\0' ' ' && echo;" for pid in pids])
+                
+                try:
+                    cmdline_result = subprocess.run(
+                        ["adb", "-s", self.adb_device, "shell", cmdline_cmd],
+                        capture_output=True, text=True, timeout=2
+                    )
+                    
+                    if cmdline_result.returncode == 0:
+                        # Parse the output - format is: "PIDxxx:" followed by cmdline on next line
+                        cmdline_map = {}
+                        lines = cmdline_result.stdout.splitlines()
+                        
+                        i = 0
+                        while i < len(lines):
+                            line = lines[i].strip()
+                            if line.startswith('PID') and ':' in line:
+                                try:
+                                    pid = int(line[3:line.index(':')])
+                                    # Next line is the cmdline
+                                    if i + 1 < len(lines):
+                                        full_cmd = lines[i + 1].strip()
+                                        if full_cmd:
+                                            cmdline_map[pid] = full_cmd
+                                    i += 2  # Skip to next PID marker
+                                except (ValueError, IndexError):
+                                    i += 1
+                            else:
+                                i += 1
+                        
+                        # Update cmdlines and extract proper names
+                        for proc in processes:
+                            if proc.pid in cmdline_map:
+                                full_cmd = cmdline_map[proc.pid]
+                                # Update cmdline if it's more detailed than what top gave us
+                                if len(full_cmd) > len(proc.cmdline):
+                                    proc.cmdline = full_cmd
+                                    
+                                    # Extract better name from full command
+                                    # For native binaries: /system/bin/surfaceflinger -> surfaceflinger
+                                    if full_cmd.startswith('/'):
+                                        proc.name = full_cmd.split('/')[-1].split()[0]
+                                    # For Android apps: com.android.chrome:privileged_process1 -> chrome
+                                    elif '.' in full_cmd or ':' in full_cmd:
+                                        base = full_cmd.split()[0].split(':')[0]  # Get first word, remove service suffix
+                                        if '.' in base:
+                                            proc.name = base.split('.')[-1]
+                                        else:
+                                            proc.name = base
+                except Exception as e:
+                    # If /proc reading fails, just use what we got from top
+                    print(f"Warning: Could not fetch full cmdlines from /proc: {e}")
+                    pass
                     
         except Exception as e:
             print(f"Error fetching ADB processes: {e}")

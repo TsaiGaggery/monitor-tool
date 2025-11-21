@@ -209,12 +209,31 @@ class MainWindow(QMainWindow):
         
         left_layout.addWidget(self.tabs)
         
-        # Right side - Control panel
+        # Right side - Control panel and Temperature
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Control panel
         self.control_panel = ControlPanel(self.freq_controller)
+        right_layout.addWidget(self.control_panel)
+        
+        # Temperature monitoring panel (moved from overview tab)
+        self.temp_panel = TemperaturePanel()
+        right_layout.addWidget(self.temp_panel)
+        
+        # Process Table (if enabled) - moved from overview tab
+        if hasattr(self.data_source, 'process_monitor') and self.data_source.process_monitor.enabled:
+            self.process_table = ProcessTableWidget()
+            self.process_table.setMinimumHeight(200)
+            right_layout.addWidget(self.process_table)
+        
+        # Add stretch at the bottom
+        right_layout.addStretch()
         
         # Add to main layout
         main_layout.addWidget(left_widget, stretch=3)
-        main_layout.addWidget(self.control_panel, stretch=1)
+        main_layout.addWidget(right_widget, stretch=1)
         
         # Status bar
         self.status_bar = QStatusBar()
@@ -314,19 +333,6 @@ class MainWindow(QMainWindow):
         
         charts_group.setLayout(self.charts_layout)
         layout.addWidget(charts_group)
-        
-        # Temperature monitoring panel
-        self.temp_panel = TemperaturePanel()
-        layout.addWidget(self.temp_panel)
-        
-        # Process Table (if enabled)
-        # Check if data source supports process info and it's enabled in config
-        # For LocalDataSource, it has a process_monitor attribute
-        if hasattr(self.data_source, 'process_monitor') and self.data_source.process_monitor.enabled:
-            self.process_table = ProcessTableWidget()
-            # Set a minimum height for the table to ensure it's usable
-            self.process_table.setMinimumHeight(200)
-            layout.addWidget(self.process_table)
             
         # Add stretch to push everything up if there's extra space
         layout.addStretch()
