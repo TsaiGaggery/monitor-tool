@@ -141,6 +141,33 @@ class TestDataLoggerLogging:
         cursor.execute("SELECT cpu_usage FROM monitoring_data")
         row = cursor.fetchone()
         assert row[0] == expected
+    
+    def test_log_process_data(self, logger):
+        """Test logging process data."""
+        processes = [
+            {
+                'pid': 1,
+                'name': 'test_proc',
+                'cpu_percent': 10.5,
+                'memory_rss': 1024,
+                'memory_vms': 2048,
+                'cmdline': 'test_proc arg',
+                'status': 'running',
+                'num_threads': 2,
+                'create_time': 1000.0
+            }
+        ]
+        
+        logger.log_process_data(processes)
+        
+        cursor = logger.conn.cursor()
+        cursor.execute("SELECT * FROM process_data")
+        row = cursor.fetchone()
+        
+        assert row is not None
+        assert row[3] == 1  # pid
+        assert row[4] == 'test_proc'  # name
+        assert row[5] == 10.5  # cpu_percent
 
 
 class TestDataLoggerCleanup:
@@ -156,7 +183,6 @@ class TestDataLoggerCleanup:
         # Insert old record (manually set timestamp)
         cursor = logger.conn.cursor()
         # Insert old record (manually set timestamp)
-        cursor = logger.conn.cursor()
         old_timestamp = int((datetime.now() - timedelta(days=10)).timestamp())
         cursor.execute('''
             INSERT INTO monitoring_data (timestamp, cpu_usage, memory_percent, gpu_usage, gpu_temp, gpu_memory, npu_usage)

@@ -45,6 +45,7 @@ def main():
     # Load configuration
     config_path = Path(__file__).parent.parent / 'config' / 'default.yaml'
     enable_tier1 = False
+    config = {}
     try:
         import yaml
         with open(config_path, 'r') as f:
@@ -134,7 +135,7 @@ def main():
         print(f"📱 Device: {args.ip}:{args.port}")
         data_source = AndroidDataSource(args.ip, args.port, enable_tier1=enable_tier1)
     else:
-        data_source = LocalDataSource(enable_tier1=enable_tier1)
+        data_source = LocalDataSource(enable_tier1=enable_tier1, config=config)
     
     # Create window with data source
     window = MainWindow(data_source=data_source)

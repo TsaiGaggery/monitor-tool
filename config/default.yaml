@@ -49,6 +49,78 @@ monitoring:
     # - Process counts: Total processes, running, blocked (detect process storms)
     # - Per-core IRQ/softirq %: Interrupt overhead per CPU core (identify IRQ imbalance)
 
+# Tier 2 configuration (Process Monitoring)
+tier2:
+  process_monitoring:
+    enabled: true
+    update_interval: 1000  # milliseconds
+    process_count: 5
+    sort_by: cpu  # Options: cpu, memory, combined
+    include_cmdline: true
+    cmdline_max_length: 50
+    thresholds:
+      cpu_warning: 50.0    # percent
+      cpu_critical: 80.0
+      memory_warning: 1073741824  # 1GB in bytes
+      memory_critical: 2147483648  # 2GB
+
+# Log Collection (Feature 2)
+log_collection:
+  enabled: false  # Disabled by default for privacy
+  sources:
+    - /var/log/syslog
+    - /var/log/kern.log
+    - /var/log/dmesg
+    - /var/log/messages
+  keywords:
+    - error
+    - warning
+    - critical
+    - fail
+    - oom
+    - killed
+    - segfault
+    - gpu
+    - thermal
+    - throttle
+  max_log_lines: 1000
+  include_context_lines: 2
+  anonymize:
+    enabled: true
+    patterns:
+      - type: ip_address
+        replacement: "xxx.xxx.xxx.xxx"
+      - type: home_dir
+        replacement: "/home/USER"
+      - type: hostname
+        replacement: "<hostname>"
+
+# AI Insights (Feature 3)
+ai_insights:
+  enabled: true
+  provider: rule_based  # Options: github_copilot, rule_based
+  api_timeout: 30
+  max_report_size: 5242880  # 5 MB
+  
+  # GitHub Copilot settings
+  github_copilot:
+    cli_command: gh copilot suggest  # or 'gh copilot explain'
+    use_local_cli: true
+  
+  # Rule-based fallback thresholds
+  thresholds:
+    high_cpu: 80.0
+    high_memory: 85.0
+    high_disk_io: 100  # MB/s
+    thermal_throttle_temp: 90  # Celsius
+  
+  # Insight sections to generate
+  insight_sections:
+    - performance_summary
+    - bottleneck_analysis
+    - recommendations
+    - anomaly_detection
+
 # Frequency control
 frequency_control:
   enabled: true

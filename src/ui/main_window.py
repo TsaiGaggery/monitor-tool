@@ -876,6 +876,11 @@ class MainWindow(QMainWindow):
             self.data_logger.log_data(cpu_info, memory_info, gpu_info, 
                                       npu_info if npu_info.get('available', False) else None,
                                       network_info, disk_info, tier1_info)
+            
+            # Log process data if available
+            if hasattr(self.data_source, 'get_process_info'):
+                processes = self.data_source.get_process_info()
+                self.data_logger.log_process_data(processes)
         
         # Use snapshot dict for export (includes standardized tier1 field names)
         export_data = snapshot.to_dict()

@@ -6,6 +6,7 @@ from .memory_monitor import MemoryMonitor
 from .npu_monitor import NPUMonitor
 from .network_monitor import NetworkMonitor
 from .disk_monitor import DiskMonitor
+from .process_monitor import ProcessMonitor
 
 __all__ = ['CPUMonitor', 'GPUMonitor', 'MemoryMonitor', 'NPUMonitor', 
-           'NetworkMonitor', 'DiskMonitor']
+           'NetworkMonitor', 'DiskMonitor', 'ProcessMonitor']

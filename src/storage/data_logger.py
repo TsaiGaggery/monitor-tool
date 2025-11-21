@@ -30,6 +30,7 @@ class DataLogger:
         self.conn = None
         self.db_lock = threading.Lock()  # Thread-safe database access
         self.auto_cleanup_days = auto_cleanup_days
+        self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")  # Generate session ID
         self.init_database()
         
         # Auto cleanup old data on initialization
@@ -51,7 +52,7 @@ class DataLogger:
                 # Check for required columns that are in the new schema
                 cursor.execute("PRAGMA table_info(monitoring_data)")
                 columns = {row[1] for row in cursor.fetchall()}
-                required_columns = {'timestamp_ms', 'monitor_cpu_utime', 'monitor_cpu_stime', 'cpu_usage'}
+                required_columns = {'timestamp_ms', 'monitor_cpu_utime', 'monitor_cpu_stime', 'cpu_usage', 'session_id'}
                 
                 # If any required column is missing, the schema is outdated
                 if not required_columns.issubset(columns):
@@ -69,6 +70,7 @@ class DataLogger:
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS monitoring_data (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT,
                 timestamp INTEGER NOT NULL,
                 cpu_usage REAL,
                 memory_percent REAL,
@@ -119,6 +121,94 @@ class DataLogger:
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_timestamp 
             ON monitoring_data(timestamp)
+        ''')
+
+        # Create index on session_id
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_session_id 
+            ON monitoring_data(session_id)
+        ''')
+
+        # v1.1 Tables
+        # Create schema_version table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS schema_version (
+                version TEXT PRIMARY KEY,
+                applied_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                description TEXT
+            )
+        ''')
+
+        # Create process_data table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS process_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME NOT NULL,
+                session_id TEXT NOT NULL,
+                pid INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                cpu_percent REAL NOT NULL,
+                memory_rss INTEGER NOT NULL,
+                memory_vms INTEGER,
+                cmdline TEXT,
+                status TEXT,
+                num_threads INTEGER,
+                create_time REAL
+            )
+        ''')
+        
+        # Create indexes for process_data
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_process_timestamp ON process_data(timestamp)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_process_session ON process_data(session_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_process_cpu ON process_data(cpu_percent DESC)')
+        
+        # Create log_entries table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS log_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                timestamp DATETIME NOT NULL,
+                source_file TEXT NOT NULL,
+                severity TEXT,
+                facility TEXT,
+                message TEXT NOT NULL,
+                raw_line TEXT,
+                process_context TEXT
+            )
+        ''')
+        
+        # Create indexes for log_entries
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_log_timestamp ON log_entries(timestamp)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_log_session ON log_entries(session_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_log_severity ON log_entries(severity)')
+        
+        # Create process_log_correlation table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS process_log_correlation (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                process_id INTEGER NOT NULL,
+                log_entry_id INTEGER NOT NULL,
+                correlation_type TEXT,
+                confidence REAL,
+                FOREIGN KEY (process_id) 
+                    REFERENCES process_data(id)
+                    ON DELETE CASCADE,
+                FOREIGN KEY (log_entry_id) 
+                    REFERENCES log_entries(id)
+                    ON DELETE CASCADE
+            )
+        ''')
+        
+        # Create report_insights table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS report_insights (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                generated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                provider TEXT,
+                insights TEXT,
+                prompt_used TEXT
+            )
         ''')
         
         self.conn.commit()
@@ -303,7 +393,7 @@ class DataLogger:
                 # Insert into database
                 cursor.execute('''
                     INSERT INTO monitoring_data 
-                    (timestamp, timestamp_ms, cpu_usage, memory_percent, gpu_usage, gpu_temp, gpu_memory, npu_usage,
+                    (session_id, timestamp, timestamp_ms, cpu_usage, memory_percent, gpu_usage, gpu_temp, gpu_memory, npu_usage,
                      cpu_user, cpu_nice, cpu_sys, cpu_idle, 
                      cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz,
                      cpu_temp_millideg, mem_total_kb, mem_free_kb, mem_available_kb,
@@ -312,8 +402,8 @@ class DataLogger:
                      ctxt, load_avg_1m, load_avg_5m, load_avg_15m, procs_running, procs_blocked,
                      per_core_irq_pct, per_core_softirq_pct, interrupt_data,
                      monitor_cpu_utime, monitor_cpu_stime)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (timestamp, timestamp_ms, cpu_usage, memory_percent, gpu_usage, gpu_temp, gpu_memory, npu_usage,
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (self.session_id, timestamp, timestamp_ms, cpu_usage, memory_percent, gpu_usage, gpu_temp, gpu_memory, npu_usage,
                       cpu_user, cpu_nice, cpu_sys, cpu_idle,
                       cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz,
                       cpu_temp_millideg, mem_total_kb, mem_free_kb, mem_available_kb,
@@ -328,6 +418,56 @@ class DataLogger:
                 print(f"Error logging data: {e}")
                 import traceback
                 traceback.print_exc()
+
+    def log_process_data(self, processes: List):
+        """Log process data to database (thread-safe)."""
+        if not processes:
+            return
+            
+        with self.db_lock:
+            try:
+                cursor = self.conn.cursor()
+                timestamp = datetime.now()
+                
+                data_to_insert = []
+                for p in processes:
+                    # Handle both ProcessInfo objects and dicts
+                    if hasattr(p, 'pid'):
+                        pid = p.pid
+                        name = p.name
+                        cpu = p.cpu_percent
+                        mem_rss = p.memory_rss
+                        mem_vms = p.memory_vms
+                        cmdline = p.cmdline
+                        status = p.status
+                        threads = p.num_threads
+                        create_time = p.create_time
+                    else:
+                        pid = p.get('pid')
+                        name = p.get('name')
+                        cpu = p.get('cpu_percent', 0.0)
+                        mem_rss = p.get('memory_rss', 0)
+                        mem_vms = p.get('memory_vms', 0)
+                        cmdline = p.get('cmdline', '')
+                        status = p.get('status', '')
+                        threads = p.get('num_threads', 0)
+                        create_time = p.get('create_time', 0.0)
+                        
+                    data_to_insert.append((
+                        timestamp, self.session_id, pid, name, cpu, 
+                        mem_rss, mem_vms, cmdline, status, threads, create_time
+                    ))
+                
+                cursor.executemany('''
+                    INSERT INTO process_data 
+                    (timestamp, session_id, pid, name, cpu_percent, memory_rss, 
+                     memory_vms, cmdline, status, num_threads, create_time)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', data_to_insert)
+                
+                self.conn.commit()
+            except Exception as e:
+                print(f"Error logging process data: {e}")
     
     def get_recent_data(self, hours: int = 1, limit: int = 1000) -> List[Dict]:
         """Get recent monitoring data (thread-safe)."""

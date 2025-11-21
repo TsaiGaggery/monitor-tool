@@ -94,6 +94,14 @@ class MonitorDataSource(ABC):
         """
         pass
     
+    def get_process_info(self) -> list:
+        """Get process information.
+        
+        Returns:
+            list: List of process information objects
+        """
+        return []
+
     @abstractmethod
     def get_source_name(self) -> str:
         """Get human-readable name of data source.
@@ -107,14 +115,15 @@ class MonitorDataSource(ABC):
 class LocalDataSource(MonitorDataSource):
     """Local system data source using psutil."""
     
-    def __init__(self, enable_tier1: bool = False):
+    def __init__(self, enable_tier1: bool = False, config: Dict = None):
         """Initialize local data source.
         
         Args:
             enable_tier1: Enable Tier 1 metrics (context switches, load avg, process counts)
+            config: Full configuration dictionary
         """
         from monitors import (CPUMonitor, MemoryMonitor, GPUMonitor, 
-                            NPUMonitor, NetworkMonitor, DiskMonitor)
+                            NPUMonitor, NetworkMonitor, DiskMonitor, ProcessMonitor)
         
         self.cpu_monitor = CPUMonitor()
         self.memory_monitor = MemoryMonitor()
@@ -122,6 +131,13 @@ class LocalDataSource(MonitorDataSource):
         self.npu_monitor = NPUMonitor()
         self.network_monitor = NetworkMonitor()
         self.disk_monitor = DiskMonitor()
+        
+        # Initialize ProcessMonitor with tier2 config if available
+        process_config = {}
+        if config and 'tier2' in config:
+            process_config = config['tier2'].get('process_monitoring', {})
+        self.process_monitor = ProcessMonitor(process_config, mode='local')
+        
         self._connected = True
         self.enable_tier1 = enable_tier1
     
@@ -187,6 +203,10 @@ class LocalDataSource(MonitorDataSource):
             'partition_usage': partitions_list
         }
     
+    def get_process_info(self) -> list:
+        """Get process information from local system."""
+        return self.process_monitor.get_top_processes()
+
     def get_source_name(self) -> str:
         """Get data source name."""
         return "Local System"
