@@ -12,6 +12,8 @@ class ControlPanel(QWidget):
     
     # Signals
     governor_changed = pyqtSignal(str)
+    governor_changed = pyqtSignal(str)
+    epp_changed = pyqtSignal(str)
     cpu_freq_changed = pyqtSignal(int, int)  # min, max
     
     def __init__(self, freq_controller, parent=None):
@@ -68,7 +70,39 @@ class ControlPanel(QWidget):
         
         # Current governor display
         self.current_gov_label = QLabel("Current: -")
+        # Current governor display
+        self.current_gov_label = QLabel("Current: -")
         gov_layout.addWidget(self.current_gov_label)
+        
+        # EPP Control (Energy Performance Preference)
+        # Only show if EPP is available or if we want to show it conditionally
+        self.epp_layout = QHBoxLayout()
+        self.epp_layout.addWidget(QLabel("Energy Preference:"))
+        
+        self.epp_combo = QComboBox()
+        epp_list = self.freq_controller.get_available_cpu_epp()
+        if epp_list:
+            self.epp_combo.addItems(epp_list)
+            current_epp = self.freq_controller.get_current_cpu_epp()
+            if current_epp:
+                index = self.epp_combo.findText(current_epp)
+                if index >= 0:
+                    self.epp_combo.setCurrentIndex(index)
+        else:
+            self.epp_combo.setEnabled(False)
+            self.epp_combo.addItem("N/A")
+            
+        self.epp_layout.addWidget(self.epp_combo)
+        
+        apply_epp_btn = QPushButton("Set")
+        apply_epp_btn.clicked.connect(self.apply_epp)
+        self.epp_layout.addWidget(apply_epp_btn)
+        
+        gov_layout.addLayout(self.epp_layout)
+        
+        # Current EPP display
+        self.current_epp_label = QLabel("Current EPP: -")
+        gov_layout.addWidget(self.current_epp_label)
         
         # Quick preset buttons
         preset_layout = QHBoxLayout()
@@ -201,9 +235,23 @@ class ControlPanel(QWidget):
                 QMessageBox.warning(self, "Error", 
                                   "Failed to set governor. Check permissions.")
     
+    def apply_epp(self):
+        """Apply selected EPP."""
+        epp = self.epp_combo.currentText()
+        if epp and epp != "N/A":
+            success = self.freq_controller.set_cpu_epp(epp)
+            if success:
+                QMessageBox.information(self, "Success", 
+                                      f"Energy Preference set to {epp}")
+                self.update_governor_info()
+                self.epp_changed.emit(epp)
+            else:
+                QMessageBox.warning(self, "Error", 
+                                  "Failed to set EPP. Check permissions.")
     def set_performance(self):
-        """Set performance mode."""
-        success = self.freq_controller.set_cpu_performance_mode()
+        """Set performance mode (Governor=performance)."""
+        # For performance, we just set the governor. EPP usually defaults to performance/default
+        success = self.freq_controller.set_cpu_governor("performance")
         if success:
             QMessageBox.information(self, "Success", 
                                   "Set to Performance mode")
@@ -213,11 +261,33 @@ class ControlPanel(QWidget):
                               "Failed to set performance mode. Check permissions.")
     
     def set_powersave(self):
-        """Set powersave mode."""
-        success = self.freq_controller.set_cpu_powersave_mode()
-        if success:
-            QMessageBox.information(self, "Success", 
-                                  "Set to Powersave mode")
+        """Set powersave mode (Governor=powersave, EPP=balance_performance)."""
+        # 1. Set governor to powersave
+        gov_success = self.freq_controller.set_cpu_governor("powersave")
+        
+        # 2. Set EPP to balance_performance (restore "balanced" behavior)
+        epp_success = False
+        if gov_success:
+            # Try to set EPP to balance_performance, fallback to default or power if not available
+            target_epp = "balance_performance"
+            available_epp = self.freq_controller.get_available_cpu_epp()
+            
+            if target_epp not in available_epp:
+                if "default" in available_epp:
+                    target_epp = "default"
+                elif "balance_power" in available_epp:
+                    target_epp = "balance_power"
+            
+            epp_success = self.freq_controller.set_cpu_epp(target_epp)
+        
+        if gov_success:
+            msg = "Set to Powersave mode"
+            if epp_success:
+                msg += f" (EPP: {target_epp})"
+            else:
+                msg += " (EPP update failed or not supported)"
+                
+            QMessageBox.information(self, "Success", msg)
             self.update_governor_info()
         else:
             QMessageBox.warning(self, "Error", 
@@ -264,7 +334,23 @@ class ControlPanel(QWidget):
                               "Failed to set GPU frequency range. Check permissions and sudoers configuration.")
     
     def update_governor_info(self):
-        """Update current governor display."""
-        current = self.freq_controller.get_current_cpu_governor()
-        if current:
-            self.current_gov_label.setText(f"Current: {current}")
+        """Update current governor and EPP display."""
+        current_gov = self.freq_controller.get_current_cpu_governor()
+        if current_gov:
+            self.current_gov_label.setText(f"Current: {current_gov}")
+            
+            # Update combo if it differs
+            index = self.governor_combo.findText(current_gov)
+            if index >= 0 and index != self.governor_combo.currentIndex():
+                self.governor_combo.setCurrentIndex(index)
+                
+        current_epp = self.freq_controller.get_current_cpu_epp()
+        if current_epp:
+            self.current_epp_label.setText(f"Current EPP: {current_epp}")
+            
+            # Update combo if it differs
+            index = self.epp_combo.findText(current_epp)
+            if index >= 0 and index != self.epp_combo.currentIndex():
+                self.epp_combo.setCurrentIndex(index)
+        else:
+            self.current_epp_label.setText("Current EPP: N/A")

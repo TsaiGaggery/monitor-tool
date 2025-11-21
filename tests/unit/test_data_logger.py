@@ -155,12 +155,12 @@ class TestDataLoggerCleanup:
         """Test cleanup removes old records."""
         # Insert old record (manually set timestamp)
         cursor = logger.conn.cursor()
-        old_timestamp = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d %H:%M:%S')
+        # Insert old record (manually set timestamp)
+        cursor = logger.conn.cursor()
+        old_timestamp = int((datetime.now() - timedelta(days=10)).timestamp())
         cursor.execute('''
-            INSERT INTO monitoring_data (timestamp, cpu_usage, cpu_freq, cpu_temp,
-                                        memory_usage, memory_percent, swap_usage,
-                                        gpu_usage, gpu_temp, gpu_memory, npu_usage, data_json)
-            VALUES (?, 50, 2400, 50, 8000000000, 50, 0, 0, 0, 0, 0, '{}')
+            INSERT INTO monitoring_data (timestamp, cpu_usage, memory_percent, gpu_usage, gpu_temp, gpu_memory, npu_usage)
+            VALUES (?, 50.0, 50.0, 0.0, 0.0, 0, 0.0)
         ''', (old_timestamp,))
         logger.conn.commit()
         
@@ -182,14 +182,13 @@ class TestDataLoggerCleanup:
     def test_auto_cleanup_on_init(self, temp_db):
         """Test auto cleanup runs on initialization."""
         # Create logger and insert old data
+        # Create logger and insert old data
         logger1 = DataLogger(db_path=temp_db, auto_cleanup_days=0)
         cursor = logger1.conn.cursor()
-        old_timestamp = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d %H:%M:%S')
+        old_timestamp = int((datetime.now() - timedelta(days=5)).timestamp())
         cursor.execute('''
-            INSERT INTO monitoring_data (timestamp, cpu_usage, cpu_freq, cpu_temp,
-                                        memory_usage, memory_percent, swap_usage,
-                                        gpu_usage, gpu_temp, gpu_memory, npu_usage, data_json)
-            VALUES (?, 50, 2400, 50, 8000000000, 50, 0, 0, 0, 0, 0, '{}')
+            INSERT INTO monitoring_data (timestamp, cpu_usage, memory_percent, gpu_usage, gpu_temp, gpu_memory, npu_usage)
+            VALUES (?, 50.0, 50.0, 0.0, 0.0, 0, 0.0)
         ''', (old_timestamp,))
         logger1.conn.commit()
         logger1.close()

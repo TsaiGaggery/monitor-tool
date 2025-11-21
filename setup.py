@@ -24,10 +24,14 @@ setup(
     ],
     python_requires=">=3.8",
     install_requires=[
+        "psutil>=5.9.0",
         "PyQt5>=5.15.0",
-        "pyqtgraph>=0.12.0",
-        "psutil>=5.8.0",
-        "numpy>=1.20.0",
+        "pyqtgraph>=0.13.0",
+        "numpy>=1.21.0",
+        "pynvml>=11.5.0",
+        "PySocks>=1.7.1",
+        "paramiko>=3.0.0",
+        "PyYAML>=6.0",
     ],
     entry_points={
         "console_scripts": [

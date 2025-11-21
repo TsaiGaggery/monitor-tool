@@ -225,53 +225,53 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(widget)
         
         # Info cards section
-        cards_layout = QHBoxLayout()
-        cards_layout.setSpacing(10)
+        self.cards_layout = QHBoxLayout()
+        self.cards_layout.setSpacing(10)
         
         # CPU Card
         self.cpu_card = InfoCard("CPU", "📊")
         self.cpu_card.set_color("#4CAF50")
-        cards_layout.addWidget(self.cpu_card)
+        self.cards_layout.addWidget(self.cpu_card)
         
         # Memory Card
         self.memory_card = InfoCard("Memory", "💾")
         self.memory_card.set_color("#2196F3")
-        cards_layout.addWidget(self.memory_card)
+        self.cards_layout.addWidget(self.memory_card)
         
         # GPU Card (if available)
         if self._initial_gpu_info.get('available', False):
             self.gpu_card = InfoCard("GPU", "🎮")
             self.gpu_card.set_color("#FF9800")
-            cards_layout.addWidget(self.gpu_card)
+            self.cards_layout.addWidget(self.gpu_card)
         
         # NPU Card (if available)
         if self._initial_npu_info.get('available', False):
             self.npu_card = InfoCard("NPU", "🧠")
             self.npu_card.set_color("#00BCD4")
-            cards_layout.addWidget(self.npu_card)
+            self.cards_layout.addWidget(self.npu_card)
         
         # Network Card
         self.network_card = InfoCard("Network", "🌐")
         self.network_card.set_color("#9C27B0")
-        cards_layout.addWidget(self.network_card)
+        self.cards_layout.addWidget(self.network_card)
         
         # Disk Card
         self.disk_card = InfoCard("Disk", "💿")
         self.disk_card.set_color("#F44336")
-        cards_layout.addWidget(self.disk_card)
+        self.cards_layout.addWidget(self.disk_card)
         
-        layout.addLayout(cards_layout)
+        layout.addLayout(self.cards_layout)
         
         # Charts section - 2x3 grid
         charts_group = QGroupBox("Real-time Monitoring")
-        charts_layout = QGridLayout()
-        charts_layout.setSpacing(10)
+        self.charts_layout = QGridLayout()
+        self.charts_layout.setSpacing(10)
         
         # Row 1: CPU and Memory
         self.overview_cpu_plot = MonitorPlotWidget("CPU Usage (%)", max_points=90)
         self.overview_memory_plot = MonitorPlotWidget("Memory Usage (%)", max_points=90)
-        charts_layout.addWidget(self.overview_cpu_plot, 0, 0)
-        charts_layout.addWidget(self.overview_memory_plot, 0, 1)
+        self.charts_layout.addWidget(self.overview_cpu_plot, 0, 0)
+        self.charts_layout.addWidget(self.overview_memory_plot, 0, 1)
         
         # Row 2: Network and Disk
         # Use KB/s for network to avoid scientific notation on small values
@@ -283,23 +283,23 @@ class MainWindow(QMainWindow):
                                                       y_label="Read (MB/s)",
                                                       y_label2="Write (MB/s)",
                                                       max_points=90)
-        charts_layout.addWidget(self.overview_network_plot, 1, 0)
-        charts_layout.addWidget(self.overview_disk_plot, 1, 1)
+        self.charts_layout.addWidget(self.overview_network_plot, 1, 0)
+        self.charts_layout.addWidget(self.overview_disk_plot, 1, 1)
         
         # Row 3: GPU and NPU (if available)
         if self._initial_gpu_info.get('available', False):
             self.overview_gpu_plot = MultiLinePlotWidget("GPU Usage & Frequency",
                                                          y_label="Usage (%)",
                                                          y_label2="Freq (MHz)")
-            charts_layout.addWidget(self.overview_gpu_plot, 2, 0)
+            self.charts_layout.addWidget(self.overview_gpu_plot, 2, 0)
         
         if self._initial_npu_info.get('available', False):
             self.overview_npu_plot = MultiLinePlotWidget("NPU Usage & Frequency",
                                                          y_label="Usage (%)",
                                                          y_label2="Freq (MHz)")
-            charts_layout.addWidget(self.overview_npu_plot, 2, 1)
+            self.charts_layout.addWidget(self.overview_npu_plot, 2, 1)
         
-        charts_group.setLayout(charts_layout)
+        charts_group.setLayout(self.charts_layout)
         layout.addWidget(charts_group)
         
         # Temperature monitoring panel
@@ -307,6 +307,53 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.temp_panel)
         
         return widget
+    
+    def add_gpu_ui(self):
+        """Dynamically add GPU UI components when GPU is detected."""
+        # Add GPU tab
+        gpu_tab = self.create_gpu_tab()
+        self.tabs.addTab(gpu_tab, "GPU")
+        
+        # Add GPU info card
+        self.gpu_card = InfoCard("GPU", "🎮")
+        self.gpu_card.set_color("#FF9800")
+        # Insert before Network card (which is at index 2 or 3 depending on NPU)
+        # Current layout: CPU, Memory, [GPU], [NPU], Network, Disk
+        # We can just add it and let layout handle it, or try to insert at correct position
+        # For simplicity, just add it to the layout
+        self.cards_layout.insertWidget(2, self.gpu_card)
+        
+        # Add GPU chart
+        self.overview_gpu_plot = MultiLinePlotWidget("GPU Usage & Frequency",
+                                                     y_label="Usage (%)",
+                                                     y_label2="Freq (MHz)")
+        self.charts_layout.addWidget(self.overview_gpu_plot, 2, 0)
+        
+        # Force layout update
+        QApplication.processEvents()
+        
+    def add_npu_ui(self):
+        """Dynamically add NPU UI components when NPU is detected."""
+        # Add NPU tab
+        npu_tab = self.create_npu_tab()
+        self.tabs.addTab(npu_tab, "NPU")
+        
+        # Add NPU info card
+        self.npu_card = InfoCard("NPU", "🧠")
+        self.npu_card.set_color("#00BCD4")
+        
+        # Insert after GPU card if exists, or at index 2
+        idx = 3 if hasattr(self, 'gpu_card') else 2
+        self.cards_layout.insertWidget(idx, self.npu_card)
+        
+        # Add NPU chart
+        self.overview_npu_plot = MultiLinePlotWidget("NPU Usage & Frequency",
+                                                     y_label="Usage (%)",
+                                                     y_label2="Freq (MHz)")
+        self.charts_layout.addWidget(self.overview_npu_plot, 2, 1)
+        
+        # Force layout update
+        QApplication.processEvents()
     
     def create_cpu_tab(self) -> QWidget:
         """Create CPU monitoring tab."""
@@ -643,6 +690,13 @@ class MainWindow(QMainWindow):
         
         # GPU data
         gpu_info = snapshot.gpu
+        
+        # Check if GPU became available dynamically
+        if gpu_info.get('available') and not hasattr(self, 'gpu_card'):
+            print("🎮 GPU detected dynamically! Adding UI...")
+            self._initial_gpu_info['available'] = True
+            self.add_gpu_ui()
+            
         if gpu_info.get('available'):
             gpus = gpu_info['gpus']
             if gpus:
@@ -676,6 +730,13 @@ class MainWindow(QMainWindow):
         
         # NPU data
         npu_info = snapshot.npu
+        
+        # Check if NPU became available dynamically
+        if npu_info.get('available') and not hasattr(self, 'npu_card'):
+            print("🧠 NPU detected dynamically! Adding UI...")
+            self._initial_npu_info['available'] = True
+            self.add_npu_ui()
+            
         if npu_info.get('available'):
             util = npu_info.get('utilization', 0)
             freq = npu_info.get('frequency', 0)

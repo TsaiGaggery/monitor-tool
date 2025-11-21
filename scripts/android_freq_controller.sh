@@ -55,6 +55,59 @@ set_cpu_governor() {
     
     echo "OK: Governor set to $governor"
     return 0
+    echo "OK: Governor set to $governor"
+    return 0
+}
+
+# Get CPU Energy Performance Preference (EPP)
+get_cpu_epp() {
+    if [ -f "/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference" ]; then
+        cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference
+    else
+        echo "N/A"
+    fi
+}
+
+# Set CPU EPP for all cores
+set_cpu_epp() {
+    epp=$1
+    
+    if [ -z "$epp" ]; then
+        echo "Error: EPP preference not specified"
+        return 1
+    fi
+    
+    # Verify EPP is available
+    if [ -f "/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_available_preferences" ]; then
+        available=$(cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_available_preferences)
+        if ! echo "$available" | grep -q "$epp"; then
+            echo "Error: EPP '$epp' not available. Available: $available"
+            return 1
+        fi
+    fi
+    
+    for i in $(seq 0 $((CPU_COUNT - 1))); do
+        epp_path="/sys/devices/system/cpu/cpu${i}/cpufreq/energy_performance_preference"
+        if [ -f "$epp_path" ]; then
+            echo "$epp" > "$epp_path" 2>/dev/null
+            if [ $? -ne 0 ]; then
+                echo "Error: Failed to set EPP for CPU $i"
+                return 1
+            fi
+        fi
+    done
+    
+    echo "OK: EPP set to $epp"
+    return 0
+}
+
+# Get available EPP preferences
+get_available_epp() {
+    if [ -f "/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_available_preferences" ]; then
+        cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_available_preferences
+    else
+        echo "N/A"
+    fi
 }
 
 # Get CPU frequency range
@@ -203,6 +256,12 @@ get_all() {
     echo ""
     echo "=== GPU Frequency Information ==="
     echo "GPU Frequency: $(get_gpu_freq_range)"
+    echo "=== GPU Frequency Information ==="
+    echo "GPU Frequency: $(get_gpu_freq_range)"
+    echo ""
+    echo "=== EPP Information ==="
+    echo "Current EPP: $(get_cpu_epp)"
+    echo "Available EPP: $(get_available_epp)"
 }
 
 # Main command dispatcher
@@ -231,6 +290,15 @@ case "$1" in
     get_all)
         get_all
         ;;
+    get_cpu_epp)
+        get_cpu_epp
+        ;;
+    set_cpu_epp)
+        set_cpu_epp "$2"
+        ;;
+    get_available_epp)
+        get_available_epp
+        ;;
     *)
         echo "Android Frequency Controller"
         echo "Usage: $0 [command] [args...]"
@@ -243,6 +311,11 @@ case "$1" in
         echo "  set_cpu_freq_range [min] [max] - Set CPU frequency range (MHz)"
         echo "  get_gpu_freq_range          - Get GPU frequency range"
         echo "  set_gpu_freq_range [min] [max] - Set GPU frequency range (MHz)"
+        echo "  get_gpu_freq_range          - Get GPU frequency range"
+        echo "  set_gpu_freq_range [min] [max] - Set GPU frequency range (MHz)"
+        echo "  get_cpu_epp                 - Get current CPU EPP"
+        echo "  set_cpu_epp [epp]           - Set CPU EPP"
+        echo "  get_available_epp           - List available EPP modes"
         echo "  get_all                     - Get all frequency information"
         exit 1
         ;;

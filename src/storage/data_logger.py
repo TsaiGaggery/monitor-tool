@@ -51,7 +51,7 @@ class DataLogger:
                 # Check for required columns that are in the new schema
                 cursor.execute("PRAGMA table_info(monitoring_data)")
                 columns = {row[1] for row in cursor.fetchall()}
-                required_columns = {'timestamp_ms', 'monitor_cpu_utime', 'monitor_cpu_stime'}
+                required_columns = {'timestamp_ms', 'monitor_cpu_utime', 'monitor_cpu_stime', 'cpu_usage'}
                 
                 # If any required column is missing, the schema is outdated
                 if not required_columns.issubset(columns):
@@ -70,6 +70,12 @@ class DataLogger:
             CREATE TABLE IF NOT EXISTS monitoring_data (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp INTEGER NOT NULL,
+                cpu_usage REAL,
+                memory_percent REAL,
+                gpu_usage REAL,
+                gpu_temp REAL,
+                gpu_memory INTEGER,
+                npu_usage REAL,
                 timestamp_ms INTEGER,
                 cpu_user INTEGER,
                 cpu_nice INTEGER,
@@ -275,10 +281,30 @@ class DataLogger:
                 monitor_cpu_utime = int(monitor_cpu_usage * 100)
                 monitor_cpu_stime = 0
                 
+                # Calculated metrics for backward compatibility and easier querying
+                cpu_usage = cpu_info.get('usage', {}).get('total', 0.0)
+                memory_percent = memory_info.get('memory', {}).get('percent', 0.0)
+                
+                gpu_usage = 0.0
+                gpu_temp = 0.0
+                gpu_memory = 0
+                if gpu_info and gpu_info.get('available'):
+                    gpus = gpu_info.get('gpus', [])
+                    if gpus:
+                        gpu = gpus[0]
+                        gpu_usage = float(gpu.get('gpu_util', 0))
+                        gpu_temp = float(gpu.get('temperature', 0))
+                        gpu_memory = int(gpu.get('memory_used', 0))
+                
+                npu_usage = 0.0
+                if npu_info and npu_info.get('available'):
+                    npu_usage = float(npu_info.get('utilization', 0))
+                
                 # Insert into database
                 cursor.execute('''
                     INSERT INTO monitoring_data 
-                    (timestamp, timestamp_ms, cpu_user, cpu_nice, cpu_sys, cpu_idle, 
+                    (timestamp, timestamp_ms, cpu_usage, memory_percent, gpu_usage, gpu_temp, gpu_memory, npu_usage,
+                     cpu_user, cpu_nice, cpu_sys, cpu_idle, 
                      cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz,
                      cpu_temp_millideg, mem_total_kb, mem_free_kb, mem_available_kb,
                      gpu_driver, gpu_freq_mhz, gpu_runtime_ms, gpu_memory_used_bytes, gpu_memory_total_bytes,
@@ -286,8 +312,9 @@ class DataLogger:
                      ctxt, load_avg_1m, load_avg_5m, load_avg_15m, procs_running, procs_blocked,
                      per_core_irq_pct, per_core_softirq_pct, interrupt_data,
                      monitor_cpu_utime, monitor_cpu_stime)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (timestamp, timestamp_ms, cpu_user, cpu_nice, cpu_sys, cpu_idle,
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (timestamp, timestamp_ms, cpu_usage, memory_percent, gpu_usage, gpu_temp, gpu_memory, npu_usage,
+                      cpu_user, cpu_nice, cpu_sys, cpu_idle,
                       cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz,
                       cpu_temp_millideg, mem_total_kb, mem_free_kb, mem_available_kb,
                       gpu_driver, gpu_freq_mhz, gpu_runtime_ms, gpu_memory_used_bytes, gpu_memory_total_bytes,
@@ -309,7 +336,7 @@ class DataLogger:
                 cursor = self.conn.cursor()
                 cursor.execute('''
                     SELECT * FROM monitoring_data
-                    WHERE timestamp >= datetime('now', '-' || ? || ' hours')
+                    WHERE timestamp >= CAST(strftime('%s', 'now', '-' || ? || ' hours') AS INTEGER)
                     ORDER BY timestamp DESC
                     LIMIT ?
                 ''', (hours, limit))
@@ -337,7 +364,7 @@ class DataLogger:
                         MAX(gpu_usage) as max_gpu,
                         COUNT(*) as sample_count
                     FROM monitoring_data
-                    WHERE timestamp >= datetime('now', '-' || ? || ' hours')
+                    WHERE timestamp >= CAST(strftime('%s', 'now', '-' || ? || ' hours') AS INTEGER)
                 ''', (hours,))
                 
                 row = cursor.fetchone()
@@ -372,7 +399,7 @@ class DataLogger:
                 # Count records to be deleted
                 cursor.execute('''
                     SELECT COUNT(*) FROM monitoring_data
-                    WHERE timestamp < datetime('now', '-' || ? || ' days')
+                    WHERE timestamp < CAST(strftime('%s', 'now', '-' || ? || ' days') AS INTEGER)
                 ''', (days,))
                 count_before = cursor.fetchone()[0]
                 
@@ -382,7 +409,7 @@ class DataLogger:
                 # Delete old records
                 cursor.execute('''
                     DELETE FROM monitoring_data
-                    WHERE timestamp < datetime('now', '-' || ? || ' days')
+                    WHERE timestamp < CAST(strftime('%s', 'now', '-' || ? || ' days') AS INTEGER)
                 ''', (days,))
                 self.conn.commit()
                 

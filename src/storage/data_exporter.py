@@ -101,38 +101,81 @@ class DataExporter:
             
             print(f"📅 Exporting data from timestamp >= {start_timestamp}")
             
-            # Query remote database directly via SSH (no backup needed)
+            # Query remote database directly via SSH
             # Use .mode json for easy parsing and .timeout to handle locks
-            # Try monitoring_data first (new schema), fall back to raw_samples (old schema)
             sql_query = f"SELECT * FROM monitoring_data WHERE timestamp >= {start_timestamp} ORDER BY timestamp ASC"
-            
             query_cmd = f"sqlite3 -json {remote_db_path} \".timeout 5000\" \"{sql_query}\""
-            ssh_cmd = ["ssh"]
-            if self.data_source.key_path:
-                ssh_cmd.extend(["-i", self.data_source.key_path])
-            if ssh_port != 22:
-                ssh_cmd.extend(["-p", str(ssh_port)])
-            ssh_cmd.append(f"{ssh_user}@{ssh_host}")
-            ssh_cmd.append(query_cmd)
             
-            print("� Querying remote database via SSH...")
-            result = subprocess.run(
-                ssh_cmd,
-                capture_output=True,
-                text=True,
-                timeout=60
-            )
+            stdout_content = ""
+            stderr_content = ""
             
-            if result.returncode != 0:
-                print(f"⚠️  Failed to query remote database: {result.stderr}")
-                return []
+            # Try to use existing paramiko client from data source first
+            used_paramiko = False
+            if hasattr(self.data_source, 'ssh_monitor') and self.data_source.ssh_monitor and self.data_source.ssh_monitor.ssh_client:
+                try:
+                    print("🔌 Using existing SSH connection for export...")
+                    stdin, stdout, stderr = self.data_source.ssh_monitor.ssh_client.exec_command(query_cmd, timeout=60)
+                    stdout_content = stdout.read().decode()
+                    stderr_content = stderr.read().decode()
+                    used_paramiko = True
+                except Exception as e:
+                    print(f"⚠️  Failed to use existing SSH connection: {e}")
+            
+            # If existing connection failed or not available, try creating a new paramiko client if we have credentials
+            if not used_paramiko and hasattr(self.data_source, 'password') and self.data_source.password:
+                try:
+                    print("🔑 Creating new SSH connection for export (using password)...")
+                    import paramiko
+                    client = paramiko.SSHClient()
+                    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                    client.connect(
+                        ssh_host, 
+                        port=ssh_port, 
+                        username=ssh_user, 
+                        password=self.data_source.password,
+                        timeout=10,
+                        look_for_keys=False,
+                        allow_agent=False
+                    )
+                    
+                    stdin, stdout, stderr = client.exec_command(query_cmd, timeout=60)
+                    stdout_content = stdout.read().decode()
+                    stderr_content = stderr.read().decode()
+                    client.close()
+                    used_paramiko = True
+                except Exception as e:
+                    print(f"⚠️  Failed to create new SSH connection: {e}")
+
+            # Fallback to system ssh command if paramiko failed
+            if not used_paramiko:
+                print("⚠️  Falling back to system SSH command (may prompt for password)...")
+                ssh_cmd = ["ssh"]
+                if self.data_source.key_path:
+                    ssh_cmd.extend(["-i", self.data_source.key_path])
+                if ssh_port != 22:
+                    ssh_cmd.extend(["-p", str(ssh_port)])
+                ssh_cmd.append(f"{ssh_user}@{ssh_host}")
+                ssh_cmd.append(query_cmd)
+                
+                print(" Querying remote database via SSH...")
+                result = subprocess.run(
+                    ssh_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+                
+                if result.returncode != 0:
+                    print(f"⚠️  Failed to query remote database: {result.stderr}")
+                    return []
+                stdout_content = result.stdout
             
             # Parse JSON output
             try:
-                rows = json.loads(result.stdout) if result.stdout.strip() else []
+                rows = json.loads(stdout_content) if stdout_content.strip() else []
             except json.JSONDecodeError as e:
                 print(f"⚠️  Failed to parse query result: {e}")
-                print(f"Output: {result.stdout[:200]}")
+                print(f"Output: {stdout_content[:200]}")
                 return []
             
             if not rows:

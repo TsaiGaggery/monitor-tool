@@ -787,8 +787,9 @@ class RemoteLinuxDataSource(MonitorDataSource):
             self.ssh_monitor.start_monitoring()
             self._connected = True
             
-            # Wait for initial data to arrive (actively poll for up to 5 seconds)
-            for _ in range(50):  # 50 * 0.1s = 5s max
+            # Wait for initial data to arrive (actively poll for up to 1 second)
+            # Since UI now supports dynamic updates, we don't need to block for long
+            for _ in range(10):  # 10 * 0.1s = 1s max
                 time.sleep(0.1)
                 first_data = self.ssh_monitor.get_latest_data()
                 if first_data:

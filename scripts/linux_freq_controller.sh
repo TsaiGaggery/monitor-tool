@@ -62,6 +62,65 @@ set_cpu_governor() {
     
     echo "OK: Governor set to $governor for $CPU_COUNT CPUs"
     return 0
+    echo "OK: Governor set to $governor for $CPU_COUNT CPUs"
+    return 0
+}
+
+# Get CPU Energy Performance Preference (EPP)
+get_cpu_epp() {
+    if [ -f "/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference" ]; then
+        cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference
+    else
+        echo "N/A"
+    fi
+}
+
+# Set CPU EPP for all cores (requires sudo)
+set_cpu_epp() {
+    epp=$1
+    
+    if [ -z "$epp" ]; then
+        echo "ERROR: EPP preference not specified"
+        return 1
+    fi
+    
+    # Verify EPP is available
+    if [ -f "/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_available_preferences" ]; then
+        available=$(cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_available_preferences)
+        if ! echo "$available" | grep -q "$epp"; then
+            echo "ERROR: EPP '$epp' not available. Available: $available"
+            return 1
+        fi
+    else
+        # Fallback check if available_preferences file doesn't exist but EPP does
+        # Common values: default, performance, balance_performance, balance_power, power
+        if [[ ! "$epp" =~ ^(default|performance|balance_performance|balance_power|power)$ ]]; then
+             echo "WARNING: Cannot verify EPP availability. Proceeding anyway."
+        fi
+    fi
+    
+    for i in $(seq 0 $((CPU_COUNT - 1))); do
+        epp_path="/sys/devices/system/cpu/cpu${i}/cpufreq/energy_performance_preference"
+        if [ -f "$epp_path" ]; then
+            echo "$epp" | sudo tee "$epp_path" > /dev/null 2>&1
+            if [ $? -ne 0 ]; then
+                echo "ERROR: Failed to set EPP for CPU $i"
+                return 1
+            fi
+        fi
+    done
+    
+    echo "OK: EPP set to $epp for $CPU_COUNT CPUs"
+    return 0
+}
+
+# Get available EPP preferences
+get_available_epp() {
+    if [ -f "/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_available_preferences" ]; then
+        cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_available_preferences
+    else
+        echo "N/A"
+    fi
 }
 
 # Get CPU frequency range
@@ -212,6 +271,12 @@ get_all() {
     
     echo -n "GPU Freq Range: "
     get_gpu_freq_range
+    
+    echo -n "Current EPP: "
+    get_cpu_epp
+    
+    echo -n "Available EPP: "
+    get_available_epp
 }
 
 # Main command dispatcher
@@ -239,6 +304,15 @@ case "$1" in
         ;;
     get_all)
         get_all
+        ;;
+    get_cpu_epp)
+        get_cpu_epp
+        ;;
+    set_cpu_epp)
+        set_cpu_epp "$2"
+        ;;
+    get_available_epp)
+        get_available_epp
         ;;
     *)
         echo "ERROR: Unknown command: $1"

@@ -146,7 +146,48 @@ class ADBFrequencyController:
         result = self._run_adb_command("set_cpu_governor", governor)
         return result is not None and result.startswith("OK:")
     
-    def get_cpu_freq_range(self, cpu_id: int = 0) -> dict:
+    def get_available_cpu_epp(self) -> List[str]:
+        """Get list of available CPU EPP preferences."""
+        if not self.is_available:
+            return []
+            
+        result = self._run_adb_command("get_all")
+        if result:
+            for line in result.split('\n'):
+                if line.startswith('Available EPP:'):
+                    epp = line.split(':', 1)[1].strip()
+                    if epp != "N/A":
+                        return epp.split()
+        return []
+    
+    def get_current_cpu_epp(self, cpu_id: int = 0) -> Optional[str]:
+        """Get current CPU EPP preference."""
+        if not self.is_available:
+            return None
+            
+        result = self._run_adb_command("get_all")
+        if result:
+            for line in result.split('\n'):
+                if line.startswith('Current EPP:'):
+                    epp = line.split(':', 1)[1].strip()
+                    return epp if epp != "N/A" else None
+        return None
+    
+    def set_cpu_epp(self, epp: str, cpu_id: Optional[int] = None) -> bool:
+        """Set CPU EPP preference for all CPUs.
+        
+        Args:
+            epp: EPP name (e.g., "performance", "balance_performance", "default")
+            cpu_id: Ignored (always sets all CPUs)
+            
+        Returns:
+            True if successful
+        """
+        if not self.is_available:
+            return False
+            
+        result = self._run_adb_command("set_cpu_epp", epp)
+        return result is not None and result.startswith("OK:")
         """Get min/max frequency range for CPUs."""
         if not self.is_available:
             return {
@@ -202,8 +243,25 @@ class ADBFrequencyController:
         return self.set_cpu_governor("performance")
     
     def set_cpu_powersave_mode(self) -> bool:
-        """Set CPU to powersave mode."""
-        return self.set_cpu_governor("powersave")
+        """Set CPU to powersave mode (Governor=powersave, EPP=balance_performance)."""
+        # 1. Set governor to powersave
+        gov_success = self.set_cpu_governor("powersave")
+        
+        # 2. Set EPP to balance_performance (restore "balanced" behavior)
+        if gov_success:
+            # Try to set EPP to balance_performance, fallback to default or power if not available
+            target_epp = "balance_performance"
+            available_epp = self.get_available_cpu_epp()
+            
+            if target_epp not in available_epp:
+                if "default" in available_epp:
+                    target_epp = "default"
+                elif "balance_power" in available_epp:
+                    target_epp = "balance_power"
+            
+            self.set_cpu_epp(target_epp)
+            
+        return gov_success
     
     def get_gpu_freq_range(self) -> Optional[dict]:
         """Get GPU frequency range."""

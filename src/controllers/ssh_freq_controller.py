@@ -269,6 +269,53 @@ class SSHFrequencyController:
         )
         return result is not None and result.startswith("OK:")
     
+    def get_available_cpu_epp(self) -> List[str]:
+        """Get list of available CPU EPP preferences."""
+        if not self.is_available:
+            return []
+            
+        result = self._run_ssh_command(f"bash {self.remote_script_path} get_all")
+        if result:
+            for line in result.split('\n'):
+                if line.startswith('Available EPP:'):
+                    epp = line.split(':', 1)[1].strip()
+                    if epp != "N/A":
+                        return epp.split()
+        return []
+    
+    def get_current_cpu_epp(self, cpu_id: int = 0) -> Optional[str]:
+        """Get current CPU EPP preference."""
+        if not self.is_available:
+            return None
+            
+        result = self._run_ssh_command(f"bash {self.remote_script_path} get_all")
+        if result:
+            for line in result.split('\n'):
+                if line.startswith('Current EPP:'):
+                    epp = line.split(':', 1)[1].strip()
+                    return epp if epp != "N/A" else None
+        return None
+    
+    def set_cpu_epp(self, epp: str, cpu_id: Optional[int] = None) -> bool:
+        """Set CPU EPP preference for all CPUs.
+        
+        Args:
+            epp: EPP name (e.g., "performance", "balance_performance", "default")
+            cpu_id: Ignored (always sets all CPUs)
+            
+        Returns:
+            True if successful
+        """
+        if not self.is_available or not self.has_sudo:
+            print("⚠️  Cannot set EPP: no sudo access or not available")
+            return False
+            
+        result = self._run_ssh_command(
+            f"bash {self.remote_script_path} set_cpu_epp {epp}",
+            timeout=10
+        )
+        return result is not None and result.startswith("OK:")
+    
     def get_cpu_freq_range(self, cpu_id: int = 0) -> dict:
         """Get min/max frequency range for CPUs.
         
@@ -391,6 +438,8 @@ class SSHFrequencyController:
                 'cpu_count': 0,
                 'governors': [],
                 'current_governor': None,
+                'epp_available': [],
+                'current_epp': None,
                 'cpu_freq': {},
                 'gpu_freq': {}
             }
@@ -401,6 +450,8 @@ class SSHFrequencyController:
             'cpu_count': self.cpu_count,
             'governors': self.get_available_cpu_governors(),
             'current_governor': self.get_current_cpu_governor(),
+            'epp_available': self.get_available_cpu_epp(),
+            'current_epp': self.get_current_cpu_epp(),
             'cpu_freq': self.get_cpu_freq_range(),
             'gpu_freq': self.get_gpu_freq_range()
         }

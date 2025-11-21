@@ -22,8 +22,8 @@ def main():
     parser = argparse.ArgumentParser(description='System Monitor Tool')
     parser.add_argument('--adb', action='store_true', 
                        help='Monitor Android device via ADB')
-    parser.add_argument('--ip', type=str, default='192.168.1.68',
-                       help='Android device IP address (default: 192.168.1.68)')
+    parser.add_argument('--ip', type=str,
+                       help='Android device IP address')
     parser.add_argument('--port', type=int, default=5555,
                        help='ADB port (default: 5555)')
     

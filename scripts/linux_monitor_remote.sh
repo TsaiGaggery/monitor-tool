@@ -410,7 +410,9 @@ get_gpu_info() {
             # Check if Intel GPU (0x8086)
             if [ "$vendor" = "0x8086" ]; then
                 # Detect GPU type and get info
-                card_num=$(echo "$card" | grep -o 'card[0-9]' | grep -o '[0-9]')
+                # Use bash string manipulation instead of grep to avoid color/alias issues
+                card_base=$(basename "$card")
+                card_num=${card_base#card}
                 
                 # Get GPU name
                 device_file="$card/device/device"
@@ -466,6 +468,11 @@ get_gpu_info() {
                 i915_rc6_path="/sys/class/drm/card${card_num}/gt/gt0/rc6_residency_ms"
                 i915_freq_path="/sys/class/drm/card${card_num}/gt_cur_freq_mhz"
                 
+                # Fallback for older kernels/paths
+                if [ ! -f "$i915_rc6_path" ]; then
+                     i915_rc6_path="/sys/class/drm/card${card_num}/power/rc6_residency_ms"
+                fi
+                
                 if [ -f "$i915_rc6_path" ]; then
                     # Intel i915 GPU - return RAW rc6_residency_ms
                     i915_rc6=$(cat "$i915_rc6_path" 2>/dev/null || echo "0")
@@ -506,9 +513,14 @@ get_npu_info() {
     local current_ts_ms=$1  # Pass current timestamp for delta calculation
     
     # Check for Intel NPU (VPU) - Meteor Lake and newer
-    npu_device="/sys/class/accel/accel0/device"
-    
-    if [ -d "$npu_device" ]; then
+    # Iterate through all accel devices to find the NPU
+    for npu_dev in /sys/class/accel/accel*; do
+        if [ ! -d "$npu_dev/device" ]; then continue; fi
+        npu_device="$npu_dev/device"
+        
+        # Check if it's an Intel NPU (vendor 0x8086)
+        # Some kernels might not expose vendor file directly in device, check parent or assume based on accel class
+        
         # Intel NPU detected
         npu_freq=0
         npu_max_freq=0
@@ -534,6 +546,11 @@ get_npu_info() {
         # Read busy time (for utilization calculation)
         if [ -f "$npu_device/npu_busy_time_us" ]; then
             npu_busy_us=$(cat "$npu_device/npu_busy_time_us" 2>/dev/null || echo "0")
+        fi
+        
+        # Check if we actually found valid NPU files (at least one should exist)
+        if [ "$npu_freq" = "0" ] && [ "$npu_busy_us" = "0" ] && [ ! -f "$npu_device/npu_busy_time_us" ]; then
+            continue
         fi
         
         # Calculate utilization on host
@@ -563,7 +580,7 @@ get_npu_info() {
         # Output format: intel-npu:freq_mhz:max_freq_mhz:mem_mb:util
         echo "intel-npu:${npu_freq}:${npu_max_freq}:${npu_mem_mb}:${npu_util}"
         return
-    fi
+    done
     
     echo "none"
 }
@@ -659,8 +676,15 @@ main() {
         
         # Only update PREV_NPU_BUSY_US as NPU still calculates on remote
         if [[ "$npu_info" == intel-npu:* ]]; then
-            npu_busy=$(cat /sys/class/accel/accel0/device/npu_busy_time_us 2>/dev/null || echo "0")
-            PREV_NPU_BUSY_US=$npu_busy
+            # Try to find the busy time file again to update PREV_NPU_BUSY_US
+            # This is a bit inefficient but necessary since we loop in get_npu_info
+            for npu_dev in /sys/class/accel/accel*; do
+                if [ -f "$npu_dev/device/npu_busy_time_us" ]; then
+                    npu_busy=$(cat "$npu_dev/device/npu_busy_time_us" 2>/dev/null || echo "0")
+                    PREV_NPU_BUSY_US=$npu_busy
+                    break
+                fi
+            done
         fi
         
         read net_rx net_tx <<< $(get_network_stats)

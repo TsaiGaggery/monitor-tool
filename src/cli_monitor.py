@@ -603,6 +603,13 @@ class CLIMonitor:
         governors = self.freq_controller.get_available_cpu_governors()
         current_gov = self.freq_controller.get_current_cpu_governor()
         
+        # Get EPP info if available
+        available_epp = []
+        current_epp = None
+        if hasattr(self.freq_controller, 'get_available_cpu_epp'):
+            available_epp = self.freq_controller.get_available_cpu_epp()
+            current_epp = self.freq_controller.get_current_cpu_epp()
+        
         while True:
             stdscr.clear()
             
@@ -618,7 +625,13 @@ class CLIMonitor:
                 stdscr.addstr(row, 2, f"Freq Range: {freq_range.get('scaling_min', 0):.0f} - {freq_range.get('scaling_max', 0):.0f} MHz")
                 row += 1
                 stdscr.addstr(row, 2, f"HW Limits: {freq_range.get('hardware_min', 0):.0f} - {freq_range.get('hardware_max', 0):.0f} MHz")
-                row += 2
+                row += 1
+            
+            if current_epp:
+                stdscr.addstr(row, 2, f"Current EPP: {current_epp}")
+                row += 1
+            
+            row += 1
             
             # Menu options
             stdscr.addstr(row, 2, "1. Set Governor")
@@ -629,6 +642,9 @@ class CLIMonitor:
             row += 1
             stdscr.addstr(row, 2, "4. Powersave Mode")
             row += 1
+            if available_epp:
+                stdscr.addstr(row, 2, "5. Set Energy Preference (EPP)")
+                row += 1
             stdscr.addstr(row, 2, "q. Back to Monitor")
             row += 2
             
@@ -666,7 +682,12 @@ class CLIMonitor:
                 else:
                     stdscr.addstr(row + 2, 2, "✗ Failed (check sudo permissions) (press any key)")
                 stdscr.refresh()
+                stdscr.refresh()
                 stdscr.getch()
+            elif choice == '5' and available_epp:
+                # Set EPP
+                self._set_epp_interactive(stdscr, available_epp)
+                current_epp = self.freq_controller.get_current_cpu_epp()
         
         # Restore settings
         try:
@@ -710,6 +731,48 @@ class CLIMonitor:
                     stdscr.addstr(row + 2, 2, f"✓ Governor set to {gov} (press any key)")
                 else:
                     stdscr.addstr(row + 2, 2, "✗ Failed to set governor (press any key)")
+            else:
+                stdscr.addstr(row + 2, 2, "✗ Invalid choice (press any key)")
+        except ValueError:
+            stdscr.addstr(row + 2, 2, "✗ Invalid input (press any key)")
+        
+        stdscr.refresh()
+        stdscr.refresh()
+        stdscr.getch()
+
+    def _set_epp_interactive(self, stdscr, available_epp):
+        """Interactive EPP selection."""
+        # Enable echo for input
+        curses.echo()
+        
+        height, width = stdscr.getmaxyx()
+        stdscr.clear()
+        
+        row = 2
+        stdscr.addstr(row, 2, "Available Energy Preferences:")
+        row += 1
+        
+        for i, epp in enumerate(available_epp, 1):
+            stdscr.addstr(row, 4, f"{i}. {epp}")
+            row += 1
+        
+        row += 1
+        stdscr.addstr(row, 2, "Select preference (number): ")
+        stdscr.refresh()
+        
+        choice = stdscr.getstr(row, 28, 5).decode('utf-8').strip()
+        
+        # Disable echo
+        curses.noecho()
+        
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(available_epp):
+                epp = available_epp[idx]
+                if self.freq_controller.set_cpu_epp(epp):
+                    stdscr.addstr(row + 2, 2, f"✓ EPP set to {epp} (press any key)")
+                else:
+                    stdscr.addstr(row + 2, 2, "✗ Failed to set EPP (press any key)")
             else:
                 stdscr.addstr(row + 2, 2, "✗ Invalid choice (press any key)")
         except ValueError:
