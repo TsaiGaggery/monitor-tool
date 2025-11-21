@@ -129,6 +129,38 @@ class FrequencyController:
         """Set CPU to powersave mode."""
         return self.set_cpu_governor('powersave')
     
+    def get_available_cpu_epp(self) -> List[str]:
+        """Get list of available CPU EPP preferences."""
+        try:
+            path = '/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_available_preferences'
+            with open(path, 'r') as f:
+                return f.read().strip().split()
+        except FileNotFoundError:
+            return []
+    
+    def get_current_cpu_epp(self, cpu_id: int = 0) -> Optional[str]:
+        """Get current CPU EPP preference."""
+        try:
+            path = f'/sys/devices/system/cpu/cpu{cpu_id}/cpufreq/energy_performance_preference'
+            with open(path, 'r') as f:
+                return f.read().strip()
+        except FileNotFoundError:
+            return None
+    
+    def set_cpu_epp(self, epp: str, cpu_id: Optional[int] = None) -> bool:
+        """Set CPU EPP preference for a specific CPU or all CPUs."""
+        if cpu_id is not None:
+            path = f'/sys/devices/system/cpu/cpu{cpu_id}/cpufreq/energy_performance_preference'
+            return self._write_sysfs(path, epp)
+        else:
+            # Set for all CPUs
+            success = True
+            for i in range(self.cpu_count):
+                path = f'/sys/devices/system/cpu/cpu{i}/cpufreq/energy_performance_preference'
+                if not self._write_sysfs(path, epp):
+                    success = False
+            return success
+    
     def get_gpu_freq_range(self) -> dict:
         """Get GPU frequency range information."""
         try:

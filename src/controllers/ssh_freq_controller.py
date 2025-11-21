@@ -269,6 +269,14 @@ class SSHFrequencyController:
         )
         return result is not None and result.startswith("OK:")
     
+    def set_cpu_performance_mode(self) -> bool:
+        """Set CPU to performance mode (max frequency)."""
+        return self.set_cpu_governor('performance')
+    
+    def set_cpu_powersave_mode(self) -> bool:
+        """Set CPU to powersave mode."""
+        return self.set_cpu_governor('powersave')
+    
     def get_available_cpu_epp(self) -> List[str]:
         """Get list of available CPU EPP preferences."""
         if not self.is_available:

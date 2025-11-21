@@ -353,6 +353,7 @@ class ADBMonitorRaw:
             ["adb", "-s", self.device_id, "shell", "sh", device_script, "1", tier1_param],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,  # Prevent adb from stealing stdin from curses
             text=True,
             bufsize=1
         )

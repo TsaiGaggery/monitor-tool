@@ -84,6 +84,7 @@ class ADBFrequencyController:
                 ["adb", "-s", self.device_id, "shell", script_cmd],
                 capture_output=True,
                 text=True,
+                stdin=subprocess.DEVNULL,  # Prevent adb from stealing stdin
                 timeout=timeout
             )
             

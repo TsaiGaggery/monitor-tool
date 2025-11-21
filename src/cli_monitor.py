@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from data_source import MonitorDataSource, LocalDataSource, AndroidDataSource, RemoteLinuxDataSource
 from storage import DataLogger, DataExporter
-from controllers import FrequencyController, ADBFrequencyController
+from controllers import FrequencyController, ADBFrequencyController, SSHFrequencyController
 from monitoring_snapshot import MonitoringSnapshot
 
 
@@ -77,9 +77,21 @@ class CLIMonitor:
                 self.freq_controller = None
                 print(f"⚠️  Android frequency control disabled (requires root)")
         elif isinstance(self.data_source, RemoteLinuxDataSource):
-            # Remote Linux via SSH - frequency control not supported yet
-            self.freq_controller = None
-            print(f"⚠️  Frequency control not supported for remote Linux")
+            # Remote Linux via SSH
+            ssh_freq_ctrl = SSHFrequencyController(
+                host=self.data_source.host,
+                port=self.data_source.port,
+                user=self.data_source.username,
+                password=self.data_source.password,
+                key_path=self.data_source.key_path
+            )
+            
+            if ssh_freq_ctrl.is_available:
+                self.freq_controller = ssh_freq_ctrl
+                print(f"✅ Remote Linux frequency control enabled")
+            else:
+                self.freq_controller = None
+                print(f"⚠️  Remote Linux frequency control disabled (requires sudo)")
         else:
             self.freq_controller = None
         
@@ -576,6 +588,15 @@ class CLIMonitor:
     
     def _show_cpu_control_menu(self, stdscr):
         """Show CPU frequency and governor control menu."""
+        if self.freq_controller is None:
+            stdscr.clear()
+            stdscr.addstr(0, 0, "=== CPU Control Menu ===")
+            stdscr.addstr(2, 0, "Feature not available in this mode (SSH/Remote).")
+            stdscr.addstr(4, 0, "Press any key to return...")
+            stdscr.refresh()
+            stdscr.getch()
+            return
+
         # Save current settings
         old_curs = curses.curs_set(0)
         try:
@@ -663,8 +684,7 @@ class CLIMonitor:
             curses.curs_set(0)  # Hide cursor
         except:
             pass
-        stdscr.nodelay(1)    # Non-blocking input
-        stdscr.timeout(100)  # Restore timeout
+        # Don't change nodelay/timeout here - let the main loop handle it
 
     
     def _set_governor_interactive(self, stdscr, governors):
@@ -756,6 +776,15 @@ class CLIMonitor:
     
     def _show_gpu_control_menu(self, stdscr):
         """Show GPU frequency control menu."""
+        if self.freq_controller is None:
+            stdscr.clear()
+            stdscr.addstr(0, 0, "=== GPU Control Menu ===")
+            stdscr.addstr(2, 0, "Feature not available in this mode (SSH/Remote).")
+            stdscr.addstr(4, 0, "Press any key to return...")
+            stdscr.refresh()
+            stdscr.getch()
+            return
+
         # Save current settings
         try:
             curses.curs_set(1)  # Show cursor
@@ -780,8 +809,7 @@ class CLIMonitor:
                 curses.curs_set(0)
             except:
                 pass
-            stdscr.nodelay(1)
-            stdscr.timeout(100)
+            # Don't change nodelay/timeout here - let the main loop handle it
             return
         
         while True:
@@ -853,8 +881,7 @@ class CLIMonitor:
             curses.curs_set(0)  # Hide cursor
         except:
             pass
-        stdscr.nodelay(1)    # Non-blocking input
-        stdscr.timeout(100)  # Restore timeout
+        # Don't change nodelay/timeout here - let the main loop handle it
     
     def _set_gpu_freq_interactive(self, stdscr, freq_range):
         """Interactive GPU frequency range setting."""
@@ -972,7 +999,7 @@ class CLIMonitor:
             curses.curs_set(0)  # Hide cursor
         except:
             pass
-        # No need to restore anything - parent will handle it
+        # Don't change nodelay/timeout here - let the main loop handle it
         
         return formats
 
@@ -1020,13 +1047,12 @@ class CLIMonitor:
     
     def _run_curses(self, stdscr, export_format: Optional[str] = None, export_output: Optional[str] = None):
         """Run monitoring loop with curses for flicker-free updates."""
-        # Note: self.running is already set to True in run_interactive()
         
-        # Configure curses - the STANDARD way that works
-        curses.curs_set(0)  # Hide cursor
-        stdscr.nodelay(0)   # BLOCKING mode
-        stdscr.timeout(100) # Wait 100ms for a key
-        stdscr.keypad(1)    # Handle special keys
+        # Configure curses
+        curses.curs_set(0)
+        stdscr.nodelay(0)
+        stdscr.timeout(50)
+        stdscr.keypad(1)
         
         # Get screen size
         height, width = stdscr.getmaxyx()
@@ -1038,73 +1064,84 @@ class CLIMonitor:
         stdscr.refresh()
         time.sleep(1)
         
-        last_update = time.time()
+        last_update = -999  # ✅ FIX: Force immediate first update
+        first_update = True  # Track if this is the first update
         
         while self.running:
             try:
-                # getch will wait UP TO 100ms for a key, then return -1
+                # Get current time BEFORE getch
+                current_time = time.time()
+                
+                # ✅ FIX: First update should happen immediately
+                should_update = first_update or (current_time - last_update >= self.update_interval)
+                
+                # Check for key (blocks up to 50ms)
                 key = stdscr.getch()
                 
-                # Handle terminal resize
+                # Handle keys
                 if key == curses.KEY_RESIZE:
                     height, width = stdscr.getmaxyx()
                     self.term_height = height
                     self.term_width = width
-                    stdscr.clear()  # Clear screen on resize
-                    last_update = 0  # Force immediate update
-                
-                # Handle keys
-                elif key == ord('q') or key == 3:  # 'q' or Ctrl+C
-                    self.running = False
-                    break
-                elif key == ord('c'):  # CPU control menu
-                    self._show_cpu_control_menu(stdscr)
                     stdscr.clear()
-                    last_update = 0
-                elif key == ord('g'):  # GPU control menu
-                    self._show_gpu_control_menu(stdscr)
-                    stdscr.clear()
-                    last_update = 0
-                elif key == ord('s'):  # Save data menu
-                    formats = self._show_save_menu(stdscr)
-                    if formats:
-                        self._save_data_async(formats)
-                    stdscr.clear()
-                    last_update = 0
-                
-                # Check if it's time to update display
-                current_time = time.time()
-                if current_time - last_update < self.update_interval:
+                    should_update = True
                     continue
+
+                if key != -1:
+                    if key == ord('q') or key == ord('Q') or key == 3:
+                        self.running = False
+                        break
+                        
+                    elif key == ord('c') or key == ord('C'):
+                        self._show_cpu_control_menu(stdscr)
+                        stdscr.clear()
+                        stdscr.refresh()  # Immediately refresh after clear
+                        # Restore main loop's timeout settings (submenus set to -1)
+                        stdscr.timeout(50)
+                        should_update = True
+                        last_update = 0  # Force immediate update
+                        
+                    elif key == ord('g') or key == ord('G'):
+                        self._show_gpu_control_menu(stdscr)
+                        stdscr.clear()
+                        stdscr.refresh()  # Immediately refresh after clear
+                        # Restore main loop's timeout settings (submenus set to -1)
+                        stdscr.timeout(50)
+                        should_update = True
+                        last_update = 0  # Force immediate update
+                        
+                    elif key == ord('s') or key == ord('S'):
+                        formats = self._show_save_menu(stdscr)
+                        if formats:
+                            self._save_data_async(formats)
+                        stdscr.clear()
+                        stdscr.refresh()  # Immediately refresh after clear
+                        # Restore main loop's timeout settings (submenus set to -1)
+                        stdscr.timeout(50)
+                        should_update = True
+                        last_update = 0  # Force immediate update
                 
-                # Get latest data from background thread (thread-safe)
-                with self.logging_lock:
-                    snapshot = self.latest_data
-                
-                # Skip if no data available yet
-                if snapshot is None:
-                    continue
-                
-                last_update = current_time
-                
-                # Draw dashboard without clearing screen first (reduces flicker)
-                dashboard = self._format_dashboard(snapshot)
-                
-                # Draw each line
-                for i, line in enumerate(dashboard.split('\n')):
-                    if i < height:
-                        try:
-                            # Write line content
-                            stdscr.addstr(i, 0, line[:width-1])
-                            # Clear rest of the line
-                            stdscr.clrtoeol()
-                        except curses.error:
-                            pass  # Ignore errors at screen edge
-                
-                # Clear any remaining lines at the bottom
-                stdscr.clrtobot()
-                
-                stdscr.refresh()
+                # Update display if needed
+                if should_update:
+                    with self.logging_lock:
+                        snapshot = self.latest_data
+                    
+                    if snapshot is not None:
+                        dashboard = self._format_dashboard(snapshot)
+                        
+                        for i, line in enumerate(dashboard.split('\n')):
+                            if i < height:
+                                try:
+                                    stdscr.addstr(i, 0, line[:width-1])
+                                    stdscr.clrtoeol()
+                                except curses.error:
+                                    pass
+                        
+                        stdscr.clrtobot()
+                        stdscr.refresh()
+                        
+                        last_update = current_time
+                        first_update = False  # ✅ Clear first update flag
                 
             except KeyboardInterrupt:
                 self.running = False
