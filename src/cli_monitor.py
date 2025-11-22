@@ -339,92 +339,131 @@ class CLIMonitor:
             if npu.get('power', 0) > 0:
                 lines.append(f"  Power: {npu['power']:.2f} W".ljust(width))
         
-        # Network Section (simplified)
+        # Middle Section: Split into Left (Net/Disk/Stats) and Right (Interrupts)
+        mid_left = []
+        mid_right = []
+        
+        # --- LEFT COLUMN ---
+        
+        # Network Section
         net = snapshot.network
         if net['io_stats']:
             io = net['io_stats']
-            # Convert bytes/sec to MB/s (1 MB = 1024 * 1024 bytes)
             up = io.get('upload_speed', 0) / (1024 * 1024)
             down = io.get('download_speed', 0) / (1024 * 1024)
             
-            lines.append("".ljust(width))
-            lines.append("🌐 Network".ljust(width))
-            lines.append(f"  ↑ {up:6.2f} MB/s    ↓ {down:6.2f} MB/s".ljust(width))
-            lines.append(f"  Packets: TX {io['packets_sent']:,} / RX {io['packets_recv']:,}".ljust(width))
+            mid_left.append("🌐 Network")
+            mid_left.append(f"  ↑ {up:6.2f} MB/s    ↓ {down:6.2f} MB/s")
+            mid_left.append(f"  Packets: TX {io['packets_sent']:,} / RX {io['packets_recv']:,}")
         
-        # Show active interfaces (compact)
         if net['interfaces'] and net['interface_stats']:
             active_ifaces = [(name, net['interface_stats'].get(name, {})) 
                            for name in net['interfaces'] 
                            if net['interface_stats'].get(name, {}).get('is_up', False)][:3]
             if active_ifaces:
                 iface_list = ", ".join([name for name, _ in active_ifaces])
-                lines.append(f"  Active: {iface_list}".ljust(width))
+                mid_left.append(f"  Active: {iface_list}")
         
-        # Disk Section (simplified)
+        # Disk Section
         disk = snapshot.disk
         if disk['io_stats']:
             io = disk['io_stats']
-            # Prefer pre-calculated MB/s values if available
             read_speed = io.get('read_speed_mb', io.get('read_speed', 0) / (1024 * 1024))
             write_speed = io.get('write_speed_mb', io.get('write_speed', 0) / (1024 * 1024))
-            lines.append("".ljust(width))
-            lines.append("💿 Disk I/O".ljust(width))
-            lines.append(f"  R {read_speed:6.2f} MB/s ({io['read_iops']:5.0f} IOPS)    W {write_speed:6.2f} MB/s ({io['write_iops']:5.0f} IOPS)".ljust(width))
+            
+            if mid_left: mid_left.append("")
+            mid_left.append("💿 Disk I/O")
+            mid_left.append(f"  R {read_speed:6.2f} MB/s ({io['read_iops']:5.0f} IOPS)")
+            mid_left.append(f"  W {write_speed:6.2f} MB/s ({io['write_iops']:5.0f} IOPS)")
         
-        # Partition usage (compact, main partitions only)
         if disk['partition_usage']:
             main_parts = [p for p in disk['partition_usage'] 
                          if not p['path'].startswith('/snap')][:3]
             if main_parts:
-                lines.append("  Storage:".ljust(width))
+                mid_left.append("  Storage:")
                 for part in main_parts:
-                    path = part['path'][:20]  # Truncate long paths
-                    lines.append(f"    {path:20s} {self._format_bar(part['percent'], 12)} {part['used']:5.0f}/{part['total']:5.0f} GB".ljust(width))
-        
-        # Tier 1 Metrics Section (if available)
+                    path = part['path'][:15]
+                    mid_left.append(f"    {path:15s} {part['percent']:3.0f}% {part['used']:4.0f}/{part['total']:4.0f}GB")
+
+        # Tier 1 Stats (Right side)
         tier1 = snapshot.tier1
         if tier1 and any(tier1.values()):
-            lines.append("".ljust(width))
-            lines.append("📊 System Metrics (Tier 1)".ljust(width))
+            if mid_right: mid_right.append("")
+            mid_right.append("📊 System Metrics")
             
-            # Context switches (show prominently)
             ctx_switches = tier1.get('context_switches', 0)
             if ctx_switches > 0:
-                lines.append(f"  Context Switches: {ctx_switches:,}/s".ljust(width))
+                mid_right.append(f"  Ctx Switch: {ctx_switches:,}/s")
             
-            # Load average
             load_avg = tier1.get('load_avg', {}) or tier1.get('load_average', {})
             if load_avg:
-                load_1 = load_avg.get('1min', 0)
-                load_5 = load_avg.get('5min', 0)
-                load_15 = load_avg.get('15min', 0)
-                if any([load_1, load_5, load_15]):
-                    lines.append(f"  Load Average: {load_1:.2f} (1m)  {load_5:.2f} (5m)  {load_15:.2f} (15m)".ljust(width))
+                l1 = load_avg.get('1min', 0)
+                l5 = load_avg.get('5min', 0)
+                l15 = load_avg.get('15min', 0)
+                if any([l1, l5, l15]):
+                    mid_right.append(f"  Load: {l1:.2f} {l5:.2f} {l15:.2f}")
             
-            # Process counts (handle both field name variations)
             process_counts = tier1.get('process_counts', {}) or tier1.get('processes', {})
             if process_counts:
                 running = process_counts.get('running', 0)
                 blocked = process_counts.get('blocked', 0)
                 total = process_counts.get('total', 0)
-                if total > 0:
-                    lines.append(f"  Processes: {total} total, {running} running, {blocked} blocked".ljust(width))
-                elif running or blocked:
-                    lines.append(f"  Processes: {running} running, {blocked} blocked".ljust(width))
-            
-            # Interrupts (top 5)
+                mid_right.append(f"  Procs: {total} ({running} run, {blocked} blk)")
+
+        # --- RIGHT COLUMN ---
+        
+        # Interrupts (Right side)
+        if tier1 and any(tier1.values()):
             interrupts = tier1.get('interrupts', {})
             if interrupts and 'interrupts' in interrupts:
                 irq_list = interrupts['interrupts']
                 if irq_list:
-                    lines.append("  Top Interrupts (counts/sec):".ljust(width))
-                    for irq in irq_list[:5]:  # Top 5
-                        name = irq.get('name', 'Unknown')[:25]
-                        # Try rate first (delta), fallback to total
+                    if mid_right: mid_right.append("")
+                    mid_right.append("⚡ Top Interrupts")
+                    for irq in irq_list[:5]:  # Show fewer interrupts to fit stats
+                        name = irq.get('name', 'Unknown')[:20]
                         count = irq.get('rate', irq.get('total', 0))
-                        lines.append(f"    {name:25s} {count:>10,}".ljust(width))
+                        mid_right.append(f"  {name:20s} {count:>8,}")
+
+        # Combine Middle Columns
+        lines.append("".ljust(width))
         
+        max_mid_lines = max(len(mid_left), len(mid_right))
+        for i in range(max_mid_lines):
+            left = mid_left[i] if i < len(mid_left) else ""
+            right = mid_right[i] if i < len(mid_right) else ""
+            combined = f"{left:<{half_width}}  {right:<{half_width}}"
+            lines.append(combined.ljust(width))
+        
+        # Top Processes Section
+        processes = snapshot.processes
+        if processes:
+            lines.append("".ljust(width))
+            lines.append("".ljust(width))
+            lines.append("📊 Top Processes".ljust(width))
+            # Header
+            header = f"    {'PID':<8} {'CPU%':<8} {'MEM':<10} {'COMMAND'}"
+            lines.append(header.ljust(width))
+            
+            for p in processes[:5]:  # Show top 5
+                # Handle both ProcessInfo objects and dicts (just in case)
+                if hasattr(p, 'pid'):
+                    pid = p.pid
+                    cpu = p.cpu_percent
+                    mem = p.memory_rss
+                    cmd = p.name
+                else:
+                    pid = p.get('pid', 0)
+                    cpu = p.get('cpu_percent', 0)
+                    mem = p.get('memory_rss', 0)
+                    cmd = p.get('name', 'Unknown')
+                
+                # Format memory (bytes to MB)
+                mem_mb = mem / (1024 * 1024)
+                
+                line = f"    {pid:<8} {cpu:<8.1f} {mem_mb:<10.1f} {cmd}"
+                lines.append(line[:width].ljust(width))
+
         # Footer
         lines.append("".ljust(width))
         lines.append("=" * width)
@@ -493,10 +532,6 @@ class CLIMonitor:
                             npu_info=snapshot.npu,
                             tier1_info=snapshot.tier1  # Tier1 now automatically included!
                         )
-                        
-                        # Log process data if available
-                        if snapshot.processes:
-                            self.logger.log_process_data(snapshot.processes)
                     
                     # Add to session exporter (for Android/SSH export)
                     # For LocalDataSource, we rely on SQLite DB to avoid double storage in memory
