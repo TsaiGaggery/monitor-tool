@@ -15,8 +15,10 @@ init_database() {
         return
     fi
     
-    # Remove old database if it exists to avoid schema mismatch
-    rm -f "$DB_PATH"
+    # Backup old database if it exists (preserve data in case of crash/disconnect)
+    if [ -f "$DB_PATH" ]; then
+        mv "$DB_PATH" "${DB_PATH}.bak"
+    fi
     
     # Use printf instead of heredoc since script is piped through ADB
     printf "%s\n" \
@@ -472,6 +474,29 @@ get_gpu_memory_raw() {
     echo "0 0"
 }
 
+# Get NPU information
+get_npu_info() {
+    # Check for standard Linux AI accelerator interface (Intel NPU uses this)
+    if [ -c "/dev/accel/accel0" ]; then
+        echo "Intel NPU"
+        return
+    fi
+    
+    # Check for legacy Intel VPU
+    if [ -d "/sys/class/intel_vpu" ]; then
+        echo "Intel VPU"
+        return
+    fi
+    
+    # Check for other common NPU devices
+    if [ -c "/dev/gnpu" ]; then
+        echo "Generic NPU"
+        return
+    fi
+    
+    echo "none"
+}
+
 # Get raw network I/O (bytes)
 get_network_raw() {
     rx_bytes=0
@@ -616,23 +641,32 @@ main() {
         LOOP_START_MS=$(date +%s%3N)
         
         # CPU data
-        read cpu_user cpu_nice cpu_sys cpu_idle cpu_iowait cpu_irq cpu_softirq cpu_steal <<< $(get_cpu_raw)
+        set -- $(get_cpu_raw)
+        cpu_user=${1:-0}; cpu_nice=${2:-0}; cpu_sys=${3:-0}; cpu_idle=${4:-0}
+        cpu_iowait=${5:-0}; cpu_irq=${6:-0}; cpu_softirq=${7:-0}; cpu_steal=${8:-0}
+        
         per_core_stats=$(get_per_core_raw)
         per_core_freq=$(get_per_core_freq)
         cpu_temp=$(get_cpu_temp_raw)
         cpu_power_uj=$(get_cpu_power_uj)
         
         # Memory data  
-        read mem_total mem_free mem_available <<< $(get_memory_raw)
+        set -- $(get_memory_raw)
+        mem_total=${1:-0}; mem_free=${2:-0}; mem_available=${3:-0}
         
         # Tier 1 metrics (conditional)
-        read ctxt load_1m load_5m load_15m procs_running procs_blocked per_core_irq_pct per_core_softirq_pct <<< $(get_tier1_metrics)
+        set -- $(get_tier1_metrics)
+        ctxt=${1:-0}; load_1m=${2:-0}; load_5m=${3:-0}; load_15m=${4:-0}
+        procs_running=${5:-0}; procs_blocked=${6:-0}
+        per_core_irq_pct=${7:-0}; per_core_softirq_pct=${8:-0}
         
         # Interrupt distribution (conditional, part of Tier 1)
         interrupt_data=$(get_interrupt_data)
         
         # Monitor CPU usage
-        read monitor_utime monitor_stime <<< $(get_monitor_cpu_usage | tr ',' ' ')
+        # Use tr to replace comma with space for splitting
+        set -- $(get_monitor_cpu_usage | tr ',' ' ')
+        monitor_utime=${1:-0}; monitor_stime=${2:-0}
         
         # Format per_core arrays for JSON (add brackets if not empty, otherwise use empty array)
         if [ -n "$per_core_irq_pct" ]; then
@@ -650,13 +684,23 @@ main() {
         # GPU data (raw values only, host will calculate utilization)
         gpu_freq=$(get_gpu_freq_raw)
         gpu_runtime=$(get_gpu_runtime_raw)
-        read gpu_mem_used gpu_mem_total <<< $(get_gpu_memory_raw)
+        # Use set -- for robust splitting
+        set -- $(get_gpu_memory_raw)
+        gpu_mem_used=${1:-0}
+        gpu_mem_total=${2:-0}
+        
+        # NPU info
+        npu_info=$(get_npu_info)
         
         # Network I/O (cumulative bytes - host will calculate delta)
-        read net_rx net_tx <<< $(get_network_raw)
+        set -- $(get_network_raw)
+        net_rx=${1:-0}
+        net_tx=${2:-0}
         
         # Disk I/O (cumulative sectors - host will calculate delta)
-        read disk_read disk_write <<< $(get_disk_raw)
+        set -- $(get_disk_raw)
+        disk_read=${1:-0}
+        disk_write=${2:-0}
         
         # Get current timestamp (seconds since epoch)
         TIMESTAMP=$(date +%s)

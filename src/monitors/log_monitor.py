@@ -118,6 +118,7 @@ class LogMonitor:
         self.mode = mode
         self.ssh_client = ssh_client
         self.adb_device = adb_device
+        self.adb_timezone_offset = None  # Cache for ADB device timezone offset
         
         # Anonymization regex patterns
         self._init_anonymization_patterns()
@@ -727,15 +728,42 @@ class LogMonitor:
         entries = []
         
         try:
+            # Get device timezone offset if not already cached
+            if self.adb_timezone_offset is None:
+                try:
+                    tz_res = subprocess.run(
+                        ['adb', '-s', self.adb_device, 'shell', 'date', '+%z'],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    if tz_res.returncode == 0:
+                        # Parse +HHMM or -HHMM
+                        tz_str = tz_res.stdout.strip()
+                        if re.match(r'^[+-]\d{4}$', tz_str):
+                            hours = int(tz_str[0:3])
+                            minutes = int(tz_str[3:5])
+                            # Adjust sign for minutes
+                            if hours < 0:
+                                minutes = -minutes
+                            from datetime import timedelta
+                            self.adb_timezone_offset = timedelta(hours=hours, minutes=minutes)
+                except Exception:
+                    pass
+
+            # Adjust start_time to device local time for -T argument
+            # start_time is UTC (ensured by collect_logs)
+            device_start_time = start_time
+            if self.adb_timezone_offset:
+                device_start_time = start_time + self.adb_timezone_offset
+
             # Use -T to specify start time (format: 'MM-DD HH:MM:SS.mmm')
             # This ensures we get logs from the monitoring period, not just last N lines
             # -d dumps and exits (non-blocking)
             # -v time shows timestamps
             cmd = ['logcat', '-d', '-v', 'time']
             
-            # Use -T to filter from start_time
+            # Use -T to filter from start_time (Device Local Time)
             # Format: MM-DD HH:MM:SS.mmm
-            time_str = start_time.strftime('%m-%d %H:%M:%S.000')
+            time_str = device_start_time.strftime('%m-%d %H:%M:%S.000')
             cmd.extend(['-T', time_str])
             
             # Add keyword filtering
@@ -744,8 +772,11 @@ class LogMonitor:
                 grep_pattern = '|'.join(self.keywords)
                 cmd.extend(['-e', grep_pattern])
             
+            # Build adb command with device selector
+            adb_cmd = ['adb', '-s', self.adb_device] + cmd
+            
             result = subprocess.run(
-                ['adb'] + cmd,
+                adb_cmd,
                 capture_output=True,
                 text=True,
                 timeout=30  # Increased timeout for potentially large dumps
@@ -784,8 +815,8 @@ class LogMonitor:
         """
         Parse Android logcat line.
         
-        Format: MM-DD HH:MM:SS.mmm PID  TID LEVEL TAG: message
-        Example: 11-21 15:30:45.123  1234  5678 I ActivityManager: Starting activity
+        Format: MM-DD HH:MM:SS.mmm LEVEL/TAG (PID): message
+        Example: 11-21 15:30:45.123 I/ActivityManager (1234): Starting activity
         
         Args:
             line: Raw logcat line
@@ -795,14 +826,18 @@ class LogMonitor:
         """
         import re
         
-        # Logcat time format pattern
-        # MM-DD HH:MM:SS.mmm  PID  TID LEVEL TAG: message
+        # Skip separator lines
+        if line.startswith('-----'):
+            return None
+        
+        # Logcat time format pattern for -v time output
+        # MM-DD HH:MM:SS.mmm LEVEL/TAG (PID): message
+        # Note: TAG can contain spaces, so we use non-greedy match until the PID part
         pattern = re.compile(
             r'^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3})\s+'  # timestamp
-            r'(\d+)\s+'  # PID
-            r'(\d+)\s+'  # TID
-            r'([VDIWEF])\s+'  # log level
-            r'([^:]+):\s*'  # tag
+            r'([VDIWEF])/'  # level/
+            r'(.*?)\s*'     # TAG (non-greedy match until PID)
+            r'\(\s*(\d+)\):\s*'  # (PID):
             r'(.*)$'  # message
         )
         
@@ -810,13 +845,23 @@ class LogMonitor:
         if not match:
             return None
         
-        timestamp_str, pid_str, tid_str, level_char, tag, message = match.groups()
+        timestamp_str, level_char, tag, pid_str, message = match.groups()
         
         # Parse timestamp (add current year since logcat doesn't include it)
         try:
             current_year = datetime.now().year
             timestamp_str_with_year = f"{current_year}-{timestamp_str}"
             timestamp = datetime.strptime(timestamp_str_with_year, '%Y-%m-%d %H:%M:%S.%f')
+            
+            # If we know the device timezone, convert this local timestamp to UTC
+            if self.adb_timezone_offset:
+                # timestamp is naive (Device Local Time)
+                # We need to subtract the offset to get UTC
+                # UTC = Local - Offset
+                timestamp = timestamp - self.adb_timezone_offset
+                # Mark as UTC
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+                
         except ValueError:
             timestamp = datetime.now()
         

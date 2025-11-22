@@ -61,6 +61,15 @@ class DataExporter:
         Args:
             data: Dictionary containing monitoring data with timestamp
         """
+        # Update session_start_timestamp with the first sample's timestamp (from device)
+        # This ensures we use device time (UTC) instead of host time
+        if len(self.session_data) == 0 and 'timestamp' in data:
+            device_timestamp = data['timestamp']
+            # Update session start time to use device's timestamp
+            if isinstance(device_timestamp, (int, float)):
+                self.session_start_timestamp = int(device_timestamp)
+                self.start_time = datetime.fromtimestamp(device_timestamp)
+            
         self.session_data.append(data.copy())
         # Invalidate cache when new data is added
         self._invalidate_cache()
@@ -100,15 +109,11 @@ class DataExporter:
         print(f"📥 Fetching remote Linux database records from {ssh_user}@{ssh_host}:{ssh_port}...")
         
         try:
-            # Use session start time from data_source (when monitoring actually started)
-            if hasattr(self.data_source, 'session_start_time') and self.data_source.session_start_time:
-                start_timestamp = int(self.data_source.session_start_time.timestamp())
-                print(f"📅 Using data source session start time: {self.data_source.session_start_time}")
-            else:
-                start_timestamp = self.session_start_timestamp
-                print(f"📅 Using exporter session start time: {datetime.fromtimestamp(start_timestamp)}")
+            # Use session timestamp from first sample received (device time, UTC)
+            # session_start_timestamp was updated when first sample arrived
+            start_timestamp = self.session_start_timestamp
             
-            print(f"📅 Exporting data from timestamp >= {start_timestamp}")
+            print(f"📅 Remote DB time range (UTC): from {datetime.utcfromtimestamp(start_timestamp)} onwards")
             
             # Query remote database directly via SSH
             # Use .mode json for easy parsing and .timeout to handle locks
@@ -465,44 +470,24 @@ class DataExporter:
         print(f"📥 Fetching Android database records from {device_id}...")
         
         try:
-            # Determine time range from actual session data (client-side timestamps)
-            # This ensures we get all data that was collected during the session
+            # Use session timestamp range from first and last samples received
+            # session_start_timestamp was updated when first sample arrived (using device time)
+            start_timestamp = self.session_start_timestamp
+            end_timestamp = int(datetime.now().timestamp())
+            
+            # If we have session data, use the last sample's timestamp for end time
             if self.session_data and len(self.session_data) > 0:
-                # Use first and last sample timestamps from session data
-                first_sample = self.session_data[0]
                 last_sample = self.session_data[-1]
-                
-                # Try to get utc_timestamp first (from device with get_timestamp_ms)
-                start_timestamp = first_sample.get('utc_timestamp')
-                end_timestamp = last_sample.get('utc_timestamp')
-                
-                # Fallback to time_seconds if utc_timestamp not available
-                if start_timestamp is None or end_timestamp is None:
-                    start_timestamp = first_sample.get('time_seconds')
-                    end_timestamp = last_sample.get('time_seconds')
-                
-                # Fallback to parsing timestamp string if time_seconds not available
-                if start_timestamp is None or end_timestamp is None:
-                    first_ts = first_sample.get('timestamp', '')
-                    last_ts = last_sample.get('timestamp', '')
-                    if first_ts and last_ts:
-                        start_timestamp = int(datetime.strptime(first_ts, '%Y-%m-%d %H:%M:%S').timestamp())
-                        end_timestamp = int(datetime.strptime(last_ts, '%Y-%m-%d %H:%M:%S').timestamp())
-                    else:
-                        # Ultimate fallback: use session_start_timestamp
-                        start_timestamp = self.session_start_timestamp
-                        end_timestamp = int(datetime.now().timestamp())
-            else:
-                # No session data yet, use session_start_timestamp
-                start_timestamp = self.session_start_timestamp
-                end_timestamp = int(datetime.now().timestamp())
+                if 'timestamp' in last_sample:
+                    ts = last_sample['timestamp']
+                    if isinstance(ts, (int, float)):
+                        end_timestamp = int(ts)
+            
+            print(f"📅 Device time range (UTC): {datetime.utcfromtimestamp(start_timestamp)} to {datetime.utcfromtimestamp(end_timestamp)}")
             
             # Fetch data as JSON directly via sqlite3 (faster than pulling entire DB)
-            # Filter by session time range: from first sample to last sample (client time)
             # Note: Put SQL directly in command args (stdin doesn't work through adb shell su)
             sql_query = f"SELECT * FROM raw_samples WHERE timestamp >= {start_timestamp} AND timestamp <= {end_timestamp} ORDER BY timestamp ASC"
-            
-            print(f"📅 Time range: {datetime.fromtimestamp(start_timestamp)} to {datetime.fromtimestamp(end_timestamp)}")
             
             # Build command
             cmd = ["adb", "-s", device_id, "shell", f"su 0 sqlite3 -json {android_db_path} '{sql_query}'"]
@@ -1706,6 +1691,18 @@ class DataExporter:
             export_samples = self.session_data
             if export_samples:
                 print(f"📊 Exporting {len(export_samples)} samples from session data (in-memory)")
+                
+                # Detect actual source type from data_source
+                if hasattr(self, 'data_source') and self.data_source:
+                    from data_source import AndroidDataSource, RemoteLinuxDataSource
+                    if isinstance(self.data_source, AndroidDataSource):
+                        source_type = 'adb'
+                        source_name = self.data_source.adb_device if hasattr(self.data_source, 'adb_device') else 'Android Device'
+                        print(f"   Detected Android data source")
+                    elif isinstance(self.data_source, RemoteLinuxDataSource):
+                        source_type = 'ssh'
+                        source_name = f"{self.data_source.username}@{self.data_source.ssh_host}" if hasattr(self.data_source, 'ssh_host') else 'SSH Remote'
+                        print(f"   Detected SSH data source")
         
         if not export_samples:
             raise ValueError("No data to export - no database or session data available")
@@ -1738,8 +1735,15 @@ class DataExporter:
         if timestamps:
             start_timestamp = min(timestamps)
             end_timestamp = max(timestamps)
-            start_time = datetime.fromtimestamp(start_timestamp)
-            end_time = datetime.fromtimestamp(end_timestamp)
+            # For remote sources (Android/SSH), timestamps are in UTC
+            # Keep them as UTC datetime objects for log collection
+            if source_type in ('adb', 'ssh'):
+                start_time = datetime.utcfromtimestamp(start_timestamp)
+                end_time = datetime.utcfromtimestamp(end_timestamp)
+            else:
+                # For local sources, use local timezone
+                start_time = datetime.fromtimestamp(start_timestamp)
+                end_time = datetime.fromtimestamp(end_timestamp)
         else:
             start_time = self.start_time
             end_time = datetime.now()
@@ -1779,7 +1783,7 @@ class DataExporter:
         # Calculate statistics
         stats = self._calculate_statistics()
         
-        html_content = self._generate_html_report(stats)
+        html_content = self._generate_html_report(stats, session_logger=session_logger)
         
         # Restore original session_data
         self.session_data = original_session_data
@@ -2098,11 +2102,12 @@ class DataExporter:
         
         return stats
     
-    def _generate_html_report(self, stats: Dict) -> str:
+    def _generate_html_report(self, stats: Dict, session_logger=None) -> str:
         """Generate interactive HTML report with charts.
         
         Args:
             stats: Statistics dictionary
+            session_logger: Optional DataLogger instance for fetching log events
             
         Returns:
             HTML string with interactive charts
@@ -2508,6 +2513,35 @@ class DataExporter:
                 'per_core_softirq': tier1_per_core_softirq
             }
         }
+        
+        # Fetch log events from session database if available
+        log_events = []
+        if session_logger:
+            try:
+                log_entries = session_logger.get_log_entries(limit=500)  # Limit to 500 most recent logs
+                for entry in log_entries:
+                    # Convert timestamp to Unix timestamp for chart alignment
+                    ts = entry.get('timestamp')
+                    if isinstance(ts, str):
+                        try:
+                            dt = datetime.fromisoformat(ts)
+                            timestamp = int(dt.timestamp())
+                        except:
+                            continue
+                    else:
+                        timestamp = int(ts) if ts else 0
+                    
+                    log_events.append({
+                        'timestamp': timestamp,
+                        'severity': entry.get('severity', 'info'),
+                        'message': entry.get('message', '')[:200],  # Limit message length
+                        'source': entry.get('source', '')
+                    })
+            except Exception as e:
+                print(f"Warning: Could not fetch log events: {e}")
+        
+        # Add log events to chart data
+        chart_data['log_events'] = log_events
         
         # Process interrupt data to build per-interrupt timeseries
         interrupt_timeseries = {}  # {interrupt_name: {'rates': [...], 'cpus': [...], ...}}

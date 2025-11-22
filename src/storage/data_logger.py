@@ -50,7 +50,7 @@ class DataLogger:
         self.conn = None
         self.db_lock = threading.Lock()  # Thread-safe database access
         self.auto_cleanup_days = auto_cleanup_days
-        self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")  # Generate session ID
+        self.session_id = None  # Will be set in init_database
         self.init_database()
         
         # Auto cleanup old data on initialization
@@ -245,6 +245,16 @@ class DataLogger:
         ''')
         
         self.conn.commit()
+        
+        # Set session_id: use existing session from session_metadata, or create new one
+        cursor.execute('SELECT session_id FROM session_metadata ORDER BY created_at DESC LIMIT 1')
+        existing_session = cursor.fetchone()
+        
+        if existing_session:
+            self.session_id = existing_session[0]
+        else:
+            # Generate new session_id if no existing session found
+            self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     def log_data(self, cpu_info: Dict, memory_info: Dict, 
                  gpu_info: Dict = None, npu_info: Dict = None, network_info: Dict = None, disk_info: Dict = None, tier1_info: Dict = None):

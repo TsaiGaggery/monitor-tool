@@ -507,7 +507,8 @@ class ADBMonitorRaw:
             
             # IMPORTANT: Use "sh" with separate arguments, NOT a single string
             # This was the original working format
-            cmd = ["adb", "-s", self.device_id, "shell", "sh", device_script, "1", tier1_flag, "0"]
+            # Enable DB logging (1) to ensure data persistence on device if connection drops
+            cmd = ["adb", "-s", self.device_id, "shell", "sh", device_script, "1", tier1_flag, "1"]
             
             self._stream_process = subprocess.Popen(
                 cmd,
