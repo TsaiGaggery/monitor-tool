@@ -1784,69 +1784,159 @@ class DataExporter:
         
         Args:
             session_logger: DataLogger instance for session database
-            samples: List of monitoring data samples
+            samples: List of monitoring data samples (can be nested or flat format)
         
         Note:
-            This uses raw SQL INSERT since the samples are already in the correct format
-            from remote DB queries. The log_data() method expects component dicts which
-            would require complex reconstruction.
+            This method handles both formats:
+            1. Nested format (from in-memory session_data): Extracts values from nested dict
+            2. Flat/raw format (from remote DB): Uses values directly
+            
+            Stores in raw/flat format matching the monitoring_data table schema,
+            ensuring compatibility with future re-exports.
         """
         if not samples:
             return
         
-        # Use direct SQL insert since samples are already in DB format
+        # Use direct SQL insert
         conn = session_logger.conn
         cursor = conn.cursor()
         
         for sample in samples:
             try:
-                # Prepare values for insertion (match monitoring_data table schema)
-                values = (
-                    session_logger.session_id,
-                    sample.get('timestamp'),
-                    sample.get('cpu_usage'),
-                    sample.get('memory_percent'),
-                    sample.get('gpu_usage'),
-                    sample.get('gpu_temp'),
-                    sample.get('gpu_memory'),
-                    sample.get('npu_usage'),
-                    sample.get('timestamp_ms'),
-                    sample.get('cpu_user'),
-                    sample.get('cpu_nice'),
-                    sample.get('cpu_sys'),
-                    sample.get('cpu_idle'),
-                    sample.get('cpu_iowait'),
-                    sample.get('cpu_irq'),
-                    sample.get('cpu_softirq'),
-                    sample.get('cpu_steal'),
-                    sample.get('per_core_raw'),
-                    sample.get('per_core_freq_khz'),
-                    sample.get('cpu_temp_millideg'),
-                    sample.get('mem_total_kb'),
-                    sample.get('mem_free_kb'),
-                    sample.get('mem_available_kb'),
-                    sample.get('gpu_driver'),
-                    sample.get('gpu_freq_mhz'),
-                    sample.get('gpu_runtime_ms'),
-                    sample.get('gpu_memory_used_bytes'),
-                    sample.get('gpu_memory_total_bytes'),
-                    sample.get('npu_info'),
-                    sample.get('net_rx_bytes'),
-                    sample.get('net_tx_bytes'),
-                    sample.get('disk_read_sectors'),
-                    sample.get('disk_write_sectors'),
-                    sample.get('ctxt'),
-                    sample.get('load_avg_1m'),
-                    sample.get('load_avg_5m'),
-                    sample.get('load_avg_15m'),
-                    sample.get('procs_running'),
-                    sample.get('procs_blocked'),
-                    sample.get('per_core_irq_pct'),
-                    sample.get('per_core_softirq_pct'),
-                    sample.get('interrupt_data'),
-                    sample.get('monitor_cpu_utime'),
-                    sample.get('monitor_cpu_stime')
-                )
+                # Handle both nested and flat formats
+                # Try to detect format by checking for nested structure
+                is_nested = 'cpu' in sample and isinstance(sample.get('cpu'), dict)
+                
+                if is_nested:
+                    # Extract from nested format (in-memory session data)
+                    cpu = sample.get('cpu', {})
+                    memory = sample.get('memory', {})
+                    gpu_info = sample.get('gpu', {})
+                    network = sample.get('network', {})
+                    disk = sample.get('disk', {})
+                    
+                    # Get timestamp
+                    timestamp = sample.get('timestamp', sample.get('time_seconds', 0))
+                    if isinstance(timestamp, str):
+                        try:
+                            timestamp = int(datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S').timestamp())
+                        except:
+                            timestamp = 0
+                    
+                    # Extract CPU usage
+                    cpu_usage = cpu.get('usage', {})
+                    if isinstance(cpu_usage, dict):
+                        cpu_total = cpu_usage.get('total', 0)
+                    else:
+                        cpu_total = cpu_usage or 0
+                    
+                    # Extract memory percent
+                    mem_percent = memory.get('percent', 0)
+                    
+                    # Extract GPU usage
+                    gpu_usage = 0
+                    if gpu_info.get('available') and gpu_info.get('gpus'):
+                        first_gpu = gpu_info['gpus'][0]
+                        gpu_usage = first_gpu.get('usage', first_gpu.get('gpu_util', 0))
+                    
+                    # Extract NPU usage  
+                    npu_usage = sample.get('npu', {}).get('usage', 0)
+                    
+                    # Build simplified values tuple with essential fields
+                    values = (
+                        session_logger.session_id,
+                        timestamp,
+                        cpu_total,  # cpu_usage
+                        mem_percent,  # memory_percent
+                        gpu_usage,  # gpu_usage
+                        gpu_info.get('gpus', [{}])[0].get('temperature', 0) if gpu_info.get('gpus') else 0,  # gpu_temp
+                        gpu_info.get('gpus', [{}])[0].get('memory_used', 0) if gpu_info.get('gpus') else 0,  # gpu_memory
+                        npu_usage,  # npu_usage
+                        sample.get('timestamp_ms', timestamp * 1000),
+                        None,  # cpu_user
+                        None,  # cpu_nice
+                        None,  # cpu_sys
+                        None,  # cpu_idle
+                        None,  # cpu_iowait
+                        None,  # cpu_irq
+                        None,  # cpu_softirq
+                        None,  # cpu_steal
+                        None,  # per_core_raw
+                        None,  # per_core_freq_khz
+                        None,  # cpu_temp_millideg
+                        int(memory.get('used', 0)),  # memory_total_kb
+                        None,  # memory_free_kb
+                        int(memory.get('available', 0)),  # memory_available_kb
+                        None,  # gpu_driver
+                        None,  # gpu_freq_mhz
+                        None,  # gpu_runtime_ms
+                        None,  # gpu_memory_used_bytes
+                        None,  # gpu_memory_total_bytes
+                        None,  # npu_info
+                        network.get('net_io', {}).get('bytes_recv', 0),  # net_rx_bytes
+                        network.get('net_io', {}).get('bytes_sent', 0),  # net_tx_bytes
+                        disk.get('disk_io', {}).get('read_bytes', 0),  # disk_read_sectors
+                        disk.get('disk_io', {}).get('write_bytes', 0),  # disk_write_sectors
+                        None,  # ctxt
+                        None,  # load_avg_1m
+                        None,  # load_avg_5m
+                        None,  # load_avg_15m
+                        None,  # procs_running
+                        None,  # procs_blocked
+                        None,  # per_core_irq_pct
+                        None,  # per_core_softirq_pct
+                        None,  # interrupt_data
+                        None,  # monitor_cpu_utime
+                        None   # monitor_cpu_stime
+                    )
+                else:
+                    # Use flat/raw format directly (from remote DB)
+                    values = (
+                        session_logger.session_id,
+                        sample.get('timestamp'),
+                        sample.get('cpu_usage'),
+                        sample.get('memory_percent'),
+                        sample.get('gpu_usage'),
+                        sample.get('gpu_temp'),
+                        sample.get('gpu_memory'),
+                        sample.get('npu_usage'),
+                        sample.get('timestamp_ms'),
+                        sample.get('cpu_user'),
+                        sample.get('cpu_nice'),
+                        sample.get('cpu_sys'),
+                        sample.get('cpu_idle'),
+                        sample.get('cpu_iowait'),
+                        sample.get('cpu_irq'),
+                        sample.get('cpu_softirq'),
+                        sample.get('cpu_steal'),
+                        sample.get('per_core_raw'),
+                        sample.get('per_core_freq_khz'),
+                        sample.get('cpu_temp_millideg'),
+                        sample.get('mem_total_kb'),
+                        sample.get('mem_free_kb'),
+                        sample.get('mem_available_kb'),
+                        sample.get('gpu_driver'),
+                        sample.get('gpu_freq_mhz'),
+                        sample.get('gpu_runtime_ms'),
+                        sample.get('gpu_memory_used_bytes'),
+                        sample.get('gpu_memory_total_bytes'),
+                        sample.get('npu_info'),
+                        sample.get('net_rx_bytes'),
+                        sample.get('net_tx_bytes'),
+                        sample.get('disk_read_sectors'),
+                        sample.get('disk_write_sectors'),
+                        sample.get('ctxt'),
+                        sample.get('load_avg_1m'),
+                        sample.get('load_avg_5m'),
+                        sample.get('load_avg_15m'),
+                        sample.get('procs_running'),
+                        sample.get('procs_blocked'),
+                        sample.get('per_core_irq_pct'),
+                        sample.get('per_core_softirq_pct'),
+                        sample.get('interrupt_data'),
+                        sample.get('monitor_cpu_utime'),
+                        sample.get('monitor_cpu_stime')
+                    )
                 
                 cursor.execute('''
                     INSERT INTO monitoring_data (
@@ -1863,8 +1953,7 @@ class DataExporter:
                 ''', values)
                 
             except Exception as e:
-                # Silently skip problematic samples (e.g., missing required fields)
-                # This is expected for in-memory samples that may not have all fields
+                # Silently skip problematic samples
                 pass
         
         conn.commit()
@@ -2075,6 +2164,7 @@ class DataExporter:
                 timestamps.append(len(timestamps))
             
             # CPU data extraction
+            # Support both nested format (live monitoring) and flat format (database export)
             if 'cpu' in sample:
                 cpu_data = sample['cpu']
                 if isinstance(cpu_data, dict):
@@ -2122,8 +2212,17 @@ class DataExporter:
                     # CPU power consumption (Intel RAPL)
                     power_watts = cpu_data.get('power_watts')
                     cpu_power.append(power_watts)
+            elif 'cpu_usage' in sample:
+                # Flat format from database - extract directly
+                cpu_usage_total.append(sample.get('cpu_usage', 0))
+                cpu_usage_per_core.append([])
+                cpu_freq_avg.append(0)
+                cpu_freq_per_core.append([])
+                cpu_temps.append([])
+                cpu_power.append(None)
             
             # GPU data extraction
+            # Support both nested format (live monitoring) and flat format (database export)
             if 'gpu' in sample:
                 gpu_data = sample['gpu']
                 if isinstance(gpu_data, dict):
@@ -2142,6 +2241,14 @@ class DataExporter:
                         gpu_freq.append(gpu_data.get('gpu_clock', 0))
                         gpu_temp.append(gpu_data.get('temperature', 0))
                         gpu_power.append(gpu_data.get('power', 0))
+            elif 'gpu_usage' in sample:
+                # Flat format from database
+                gpu_usage.append(sample.get('gpu_usage', 0) or 0)
+                gpu_memory_used.append(sample.get('gpu_memory', 0) or 0)
+                gpu_memory_util.append(0)
+                gpu_freq.append(sample.get('gpu_freq_mhz', 0) or 0)
+                gpu_temp.append(sample.get('gpu_temp', 0) or 0)
+                gpu_power.append(0)
             else:
                 gpu_usage.append(0)
                 gpu_memory_used.append(0)
@@ -2151,6 +2258,7 @@ class DataExporter:
                 gpu_power.append(0)
             
             # Memory data extraction
+            # Support both nested format (live monitoring) and flat format (database export)
             if 'memory' in sample:
                 mem_data = sample['memory']
                 if isinstance(mem_data, dict):
@@ -2169,8 +2277,15 @@ class DataExporter:
                         swap_percent.append(mem_data['swap'].get('percent', 0))
                     else:
                         swap_percent.append(0)
+            elif 'memory_percent' in sample:
+                # Flat format from database
+                memory_percent.append(sample.get('memory_percent', 0) or 0)
+                memory_used.append(0)
+                memory_available.append(sample.get('mem_available_kb', 0) or 0)
+                swap_percent.append(0)
             
             # NPU data extraction
+            # Support both nested format (live monitoring) and flat format (database export)
             if 'npu' in sample:
                 npu_data = sample['npu']
                 if isinstance(npu_data, dict):
@@ -2185,6 +2300,9 @@ class DataExporter:
                         npu_usage.append(0)
                 else:
                     npu_usage.append(0)
+            elif 'npu_usage' in sample:
+                # Flat format from database
+                npu_usage.append(sample.get('npu_usage', 0) or 0)
             else:
                 # No NPU data in this sample, append 0 to keep arrays aligned
                 npu_usage.append(0)
