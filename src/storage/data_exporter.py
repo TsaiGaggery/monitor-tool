@@ -6,9 +6,18 @@ import csv
 import os
 import subprocess
 import time
+import yaml
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from pathlib import Path
+
+# Import for session database and log collection
+from storage.data_logger import DataLogger
+try:
+    from monitors.log_monitor import LogMonitor, LogEntry
+except ImportError:
+    LogMonitor = None
+    LogEntry = None
 
 
 class DataExporter:
@@ -1609,27 +1618,51 @@ class DataExporter:
         
         return str(filepath)
     
-    def export_html(self, filename: str = None, use_android_db: bool = True, use_ssh_db: bool = True) -> str:
-        """Export session data to HTML report format.
+    def export_html(self, filename: str = None, use_android_db: bool = True, use_ssh_db: bool = True,
+                   collect_logs: bool = None, config: Dict = None) -> str:
+        """Export session data to HTML report format with optional log collection.
         
         Args:
             filename: Output filename. Auto-generated if None.
             use_android_db: If True and data source is Android, pull from Android DB
             use_ssh_db: If True and data source is SSH, pull from remote Linux DB
+            collect_logs: Whether to collect system logs. If None, read from config.
+            config: Configuration dict with log_collection settings. If None, loads from default.yaml.
             
         Returns:
             Path to the exported file
         """
-        if filename is None:
-            timestamp = self.start_time.strftime('%Y%m%d_%H%M%S')
-            # Include source information in filename
-            if self.data_source:
-                source_name = self.data_source.get_source_name().replace(' ', '_').replace('(', '').replace(')', '').replace(':', '_')
-                filename = f'monitoring_report_{source_name}_{timestamp}.html'
+        # Load config if not provided
+        if config is None:
+            config_path = Path('config/default.yaml')
+            if config_path.exists():
+                with open(config_path, 'r') as f:
+                    config = yaml.safe_load(f)
             else:
-                filename = f'monitoring_report_{timestamp}.html'
+                config = {}
         
-        filepath = self.output_dir / filename
+        # Determine if we should collect logs
+        if collect_logs is None:
+            log_config = config.get('log_collection', {})
+            collect_logs = log_config.get('enabled', False)
+        
+        # Generate session ID and create session directory
+        session_id = self.start_time.strftime('%Y%m%d_%H%M%S')
+        if self.data_source:
+            source_name = self.data_source.get_source_name().replace(' ', '_').replace('(', '').replace(')', '').replace(':', '_')
+            session_id = f"{source_name}_{session_id}"
+        
+        session_dir = self.base_output_dir / f'session_{session_id}'
+        session_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create session database
+        session_db_path = session_dir / 'monitoring_data.db'
+        session_logger = DataLogger(db_path=str(session_db_path))
+        
+        if filename is None:
+            filename = f'report.html'
+        
+        filepath = session_dir / filename
         
         # Priority for data sources:
         # 1. SSH DB (remote Linux)
@@ -1637,18 +1670,26 @@ class DataExporter:
         # 3. Local DB (~/.monitor-tool/monitor_data.db)
         # 4. Session data (in-memory fallback)
         export_samples = None
+        source_type = 'local'
+        source_name = 'localhost'
         
         # Priority: SSH DB > Android DB > Local DB > Session data
         if use_ssh_db:
             ssh_data = self._pull_ssh_db_data()
             if ssh_data:
                 export_samples = ssh_data
+                source_type = 'ssh'
+                if hasattr(self.data_source, 'ssh_host'):
+                    source_name = f"{self.data_source.username}@{self.data_source.ssh_host}"
                 print(f"📊 Exporting {len(export_samples)} samples from remote Linux database")
         
         if use_android_db and export_samples is None:  # Only if SSH didn't provide data
             android_data = self._pull_android_db_data()
             if android_data:
                 export_samples = android_data
+                source_type = 'adb'
+                if hasattr(self.data_source, 'adb_device'):
+                    source_name = self.data_source.adb_device
                 print(f"📊 Exporting {len(export_samples)} samples from Android database")
         
         # Try local database for LocalDataSource
@@ -1656,6 +1697,8 @@ class DataExporter:
             local_data = self._pull_local_db_data()
             if local_data:
                 export_samples = local_data
+                source_type = 'local'
+                source_name = 'localhost'
                 print(f"📊 Exporting {len(export_samples)} samples from local database")
         
         # Fallback to session_data
@@ -1666,6 +1709,49 @@ class DataExporter:
         
         if not export_samples:
             raise ValueError("No data to export - no database or session data available")
+        
+        # Store monitoring data in session database
+        print(f"💾 Storing {len(export_samples)} samples in session database...")
+        self._store_monitoring_data_in_session_db(session_logger, export_samples)
+        
+        # Determine time range from data
+        timestamps = [s.get('timestamp', 0) for s in export_samples if 'timestamp' in s]
+        if timestamps:
+            start_timestamp = min(timestamps)
+            end_timestamp = max(timestamps)
+            start_time = datetime.fromtimestamp(start_timestamp)
+            end_time = datetime.fromtimestamp(end_timestamp)
+        else:
+            start_time = self.start_time
+            end_time = datetime.now()
+        
+        # Store session metadata
+        session_logger.set_session_metadata(
+            start_time=start_time,
+            end_time=end_time,
+            source_type=source_type,
+            source_name=source_name,
+            log_collection_enabled=collect_logs
+        )
+        
+        # Collect logs if enabled
+        log_count = 0
+        if collect_logs and LogMonitor is not None:
+            print(f"📋 Collecting logs from {start_time} to {end_time}...")
+            try:
+                log_entries = self._collect_logs_for_session(
+                    start_time, end_time, source_type, config
+                )
+                
+                if log_entries:
+                    log_count = session_logger.log_entries(log_entries)
+                    print(f"✓ Stored {log_count} log entries in session database")
+                else:
+                    print("ℹ️  No log entries collected")
+            except Exception as e:
+                print(f"⚠️  Error collecting logs: {e}")
+                import traceback
+                traceback.print_exc()
         
         # Temporarily replace session_data for statistics calculation
         original_session_data = self.session_data
@@ -1682,7 +1768,156 @@ class DataExporter:
         with open(filepath, 'w') as htmlfile:
             htmlfile.write(html_content)
         
+        # Print summary
+        print(f"\n📊 Report Generation Summary:")
+        print(f"   Session ID: {session_id}")
+        print(f"   Time Range: {start_time} to {end_time}")
+        print(f"   Data Samples: {len(export_samples)}")
+        print(f"   Log Entries: {log_count}")
+        print(f"   Database: {session_db_path}")
+        print(f"   Report: {filepath}")
+        
         return str(filepath)
+    
+    def _store_monitoring_data_in_session_db(self, session_logger: DataLogger, samples: List[Dict]):
+        """Store monitoring data samples in session database.
+        
+        Args:
+            session_logger: DataLogger instance for session database
+            samples: List of monitoring data samples
+        
+        Note:
+            This uses raw SQL INSERT since the samples are already in the correct format
+            from remote DB queries. The log_data() method expects component dicts which
+            would require complex reconstruction.
+        """
+        if not samples:
+            return
+        
+        # Use direct SQL insert since samples are already in DB format
+        conn = session_logger.conn
+        cursor = conn.cursor()
+        
+        for sample in samples:
+            try:
+                # Prepare values for insertion (match monitoring_data table schema)
+                values = (
+                    session_logger.session_id,
+                    sample.get('timestamp'),
+                    sample.get('cpu_usage'),
+                    sample.get('memory_percent'),
+                    sample.get('gpu_usage'),
+                    sample.get('gpu_temp'),
+                    sample.get('gpu_memory'),
+                    sample.get('npu_usage'),
+                    sample.get('timestamp_ms'),
+                    sample.get('cpu_user'),
+                    sample.get('cpu_nice'),
+                    sample.get('cpu_sys'),
+                    sample.get('cpu_idle'),
+                    sample.get('cpu_iowait'),
+                    sample.get('cpu_irq'),
+                    sample.get('cpu_softirq'),
+                    sample.get('cpu_steal'),
+                    sample.get('per_core_raw'),
+                    sample.get('per_core_freq_khz'),
+                    sample.get('cpu_temp_millideg'),
+                    sample.get('mem_total_kb'),
+                    sample.get('mem_free_kb'),
+                    sample.get('mem_available_kb'),
+                    sample.get('gpu_driver'),
+                    sample.get('gpu_freq_mhz'),
+                    sample.get('gpu_runtime_ms'),
+                    sample.get('gpu_memory_used_bytes'),
+                    sample.get('gpu_memory_total_bytes'),
+                    sample.get('npu_info'),
+                    sample.get('net_rx_bytes'),
+                    sample.get('net_tx_bytes'),
+                    sample.get('disk_read_sectors'),
+                    sample.get('disk_write_sectors'),
+                    sample.get('ctxt'),
+                    sample.get('load_avg_1m'),
+                    sample.get('load_avg_5m'),
+                    sample.get('load_avg_15m'),
+                    sample.get('procs_running'),
+                    sample.get('procs_blocked'),
+                    sample.get('per_core_irq_pct'),
+                    sample.get('per_core_softirq_pct'),
+                    sample.get('interrupt_data'),
+                    sample.get('monitor_cpu_utime'),
+                    sample.get('monitor_cpu_stime')
+                )
+                
+                cursor.execute('''
+                    INSERT INTO monitoring_data (
+                        session_id, timestamp, cpu_usage, memory_percent, gpu_usage, gpu_temp,
+                        gpu_memory, npu_usage, timestamp_ms, cpu_user, cpu_nice, cpu_sys, cpu_idle,
+                        cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, per_core_raw, per_core_freq_khz,
+                        cpu_temp_millideg, mem_total_kb, mem_free_kb, mem_available_kb,
+                        gpu_driver, gpu_freq_mhz, gpu_runtime_ms, gpu_memory_used_bytes, gpu_memory_total_bytes,
+                        npu_info, net_rx_bytes, net_tx_bytes, disk_read_sectors, disk_write_sectors,
+                        ctxt, load_avg_1m, load_avg_5m, load_avg_15m, procs_running, procs_blocked,
+                        per_core_irq_pct, per_core_softirq_pct, interrupt_data,
+                        monitor_cpu_utime, monitor_cpu_stime
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', values)
+                
+            except Exception as e:
+                # Silently skip problematic samples (e.g., missing required fields)
+                # This is expected for in-memory samples that may not have all fields
+                pass
+        
+        conn.commit()
+    
+    def _collect_logs_for_session(self, start_time: datetime, end_time: datetime,
+                                  source_type: str, config: Dict) -> List:
+        """Collect system logs for the session time range.
+        
+        Args:
+            start_time: Session start time
+            end_time: Session end time
+            source_type: Type of data source ('local', 'ssh', 'adb')
+            config: Configuration dictionary
+        
+        Returns:
+            List of LogEntry objects
+        """
+        if LogMonitor is None:
+            print("⚠️  LogMonitor not available, skipping log collection")
+            return []
+        
+        log_config = config.get('log_collection', {})
+        
+        # Determine mode based on source type
+        mode = source_type  # 'local', 'ssh', or 'adb'
+        
+        # Get SSH client or ADB device if available
+        ssh_client = None
+        adb_device = None
+        
+        if mode == 'ssh' and hasattr(self.data_source, 'ssh_client'):
+            ssh_client = self.data_source.ssh_client
+        elif mode == 'adb' and hasattr(self.data_source, 'adb_device'):
+            adb_device = self.data_source.adb_device
+        
+        # Create LogMonitor instance
+        try:
+            log_monitor = LogMonitor(
+                config=log_config,
+                mode=mode,
+                ssh_client=ssh_client,
+                adb_device=adb_device
+            )
+            
+            # Collect logs for time range
+            log_entries = log_monitor.collect_logs(start_time, end_time)
+            return log_entries
+            
+        except Exception as e:
+            print(f"⚠️  Error initializing LogMonitor: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
     
     def _flatten_dict(self, d: Dict, parent_key: str = '', sep: str = '_') -> Dict:
         """Flatten nested dictionary.

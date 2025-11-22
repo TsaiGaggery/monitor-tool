@@ -7,6 +7,26 @@ import threading
 from datetime import datetime
 from typing import Dict, List, Optional
 import os
+from pathlib import Path
+
+# Import LogEntry for log storage
+try:
+    from monitors.log_monitor import LogEntry
+except ImportError:
+    # Fallback for testing or standalone usage
+    from dataclasses import dataclass
+    from datetime import datetime
+    from typing import Optional, List
+    
+    @dataclass
+    class LogEntry:
+        timestamp: datetime
+        source_file: str
+        severity: Optional[str]
+        facility: Optional[str]
+        message: str
+        raw_line: str
+        process_context: Optional[List[int]] = None
 
 
 class DataLogger:
@@ -208,6 +228,19 @@ class DataLogger:
                 provider TEXT,
                 insights TEXT,
                 prompt_used TEXT
+            )
+        ''')
+        
+        # Create session_metadata table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS session_metadata (
+                session_id TEXT PRIMARY KEY,
+                start_time DATETIME NOT NULL,
+                end_time DATETIME,
+                source_type TEXT NOT NULL,
+                source_name TEXT,
+                log_collection_enabled BOOLEAN DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
@@ -419,6 +452,181 @@ class DataLogger:
                 import traceback
                 traceback.print_exc()
 
+    def log_entries(self, log_entries: List[LogEntry], batch_size: int = 100) -> int:
+        """Store log entries in batch for performance (thread-safe).
+        
+        Args:
+            log_entries: List of LogEntry objects
+            batch_size: Number of entries per batch insert
+        
+        Returns:
+            Number of entries inserted
+        """
+        if not log_entries:
+            return 0
+        
+        with self.db_lock:
+            try:
+                cursor = self.conn.cursor()
+                inserted = 0
+                
+                # Batch insert for performance
+                for i in range(0, len(log_entries), batch_size):
+                    batch = log_entries[i:i+batch_size]
+                    
+                    values = []
+                    for entry in batch:
+                        # Convert process PIDs to JSON array
+                        pids_json = json.dumps(entry.process_context) if entry.process_context else '[]'
+                        
+                        # Ensure timestamp is string
+                        timestamp_str = entry.timestamp.isoformat() if hasattr(entry.timestamp, 'isoformat') else str(entry.timestamp)
+                        
+                        values.append((
+                            self.session_id,
+                            timestamp_str,
+                            entry.source_file,
+                            entry.severity,
+                            entry.facility,
+                            entry.message,
+                            entry.raw_line,
+                            pids_json
+                        ))
+                    
+                    cursor.executemany('''
+                        INSERT INTO log_entries 
+                        (session_id, timestamp, source_file, severity, facility, 
+                         message, raw_line, process_context)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', values)
+                    
+                    inserted += len(values)
+                
+                self.conn.commit()
+                return inserted
+            except Exception as e:
+                print(f"Error logging log entries: {e}")
+                import traceback
+                traceback.print_exc()
+                return 0
+    
+    def set_session_metadata(self, start_time: datetime, end_time: datetime = None,
+                           source_type: str = 'local', source_name: str = None,
+                           log_collection_enabled: bool = False):
+        """Store session metadata (thread-safe).
+        
+        Args:
+            start_time: Session start time
+            end_time: Session end time (optional)
+            source_type: Type of data source ('local', 'ssh', 'adb')
+            source_name: Name/identifier of source (hostname, IP, device ID)
+            log_collection_enabled: Whether logs were collected
+        """
+        with self.db_lock:
+            try:
+                cursor = self.conn.cursor()
+                
+                # Convert to ISO format strings
+                start_str = start_time.isoformat() if hasattr(start_time, 'isoformat') else str(start_time)
+                end_str = end_time.isoformat() if end_time and hasattr(end_time, 'isoformat') else (str(end_time) if end_time else None)
+                
+                cursor.execute('''
+                    INSERT OR REPLACE INTO session_metadata 
+                    (session_id, start_time, end_time, source_type, source_name, log_collection_enabled)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (self.session_id, start_str, end_str, source_type, source_name, log_collection_enabled))
+                
+                self.conn.commit()
+            except Exception as e:
+                print(f"Error setting session metadata: {e}")
+    
+    def get_session_metadata(self, session_id: str = None) -> Optional[Dict]:
+        """Get session metadata (thread-safe).
+        
+        Args:
+            session_id: Session ID to query, or use current session
+        
+        Returns:
+            Dictionary with session metadata or None
+        """
+        with self.db_lock:
+            try:
+                cursor = self.conn.cursor()
+                sid = session_id or self.session_id
+                
+                cursor.execute('''
+                    SELECT session_id, start_time, end_time, source_type, 
+                           source_name, log_collection_enabled, created_at
+                    FROM session_metadata
+                    WHERE session_id = ?
+                ''', (sid,))
+                
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        'session_id': row[0],
+                        'start_time': row[1],
+                        'end_time': row[2],
+                        'source_type': row[3],
+                        'source_name': row[4],
+                        'log_collection_enabled': bool(row[5]),
+                        'created_at': row[6]
+                    }
+                return None
+            except Exception as e:
+                print(f"Error getting session metadata: {e}")
+                return None
+    
+    def get_log_entries(self, session_id: str = None, severity: str = None,
+                       start_time: datetime = None, end_time: datetime = None,
+                       limit: int = 1000) -> List[Dict]:
+        """Get log entries from database (thread-safe).
+        
+        Args:
+            session_id: Session ID to query, or use current session
+            severity: Filter by severity level
+            start_time: Filter by start time
+            end_time: Filter by end time
+            limit: Maximum number of entries to return
+        
+        Returns:
+            List of log entry dictionaries
+        """
+        with self.db_lock:
+            try:
+                cursor = self.conn.cursor()
+                sid = session_id or self.session_id
+                
+                query = 'SELECT * FROM log_entries WHERE session_id = ?'
+                params = [sid]
+                
+                if severity:
+                    query += ' AND severity = ?'
+                    params.append(severity)
+                
+                if start_time:
+                    start_str = start_time.isoformat() if hasattr(start_time, 'isoformat') else str(start_time)
+                    query += ' AND timestamp >= ?'
+                    params.append(start_str)
+                
+                if end_time:
+                    end_str = end_time.isoformat() if hasattr(end_time, 'isoformat') else str(end_time)
+                    query += ' AND timestamp <= ?'
+                    params.append(end_str)
+                
+                query += ' ORDER BY timestamp DESC LIMIT ?'
+                params.append(limit)
+                
+                cursor.execute(query, params)
+                
+                columns = [desc[0] for desc in cursor.description]
+                rows = cursor.fetchall()
+                
+                return [dict(zip(columns, row)) for row in rows]
+            except Exception as e:
+                print(f"Error getting log entries: {e}")
+                return []
+    
     def log_process_data(self, processes: List):
         """Log process data to database (thread-safe)."""
         if not processes:
