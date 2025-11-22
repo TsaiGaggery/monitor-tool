@@ -1714,8 +1714,27 @@ class DataExporter:
         print(f"💾 Storing {len(export_samples)} samples in session database...")
         self._store_monitoring_data_in_session_db(session_logger, export_samples)
         
-        # Determine time range from data
-        timestamps = [s.get('timestamp', 0) for s in export_samples if 'timestamp' in s]
+        # Determine time range from data - convert timestamps to integers
+        timestamps = []
+        for s in export_samples:
+            if 'timestamp' in s:
+                ts = s.get('timestamp', 0)
+                if isinstance(ts, str):
+                    try:
+                        # Parse datetime string
+                        dt = datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
+                        timestamps.append(int(dt.timestamp()))
+                    except:
+                        try:
+                            timestamps.append(int(float(ts)))
+                        except:
+                            pass
+                else:
+                    try:
+                        timestamps.append(int(ts))
+                    except:
+                        pass
+        
         if timestamps:
             start_timestamp = min(timestamps)
             end_timestamp = max(timestamps)
@@ -1815,13 +1834,22 @@ class DataExporter:
                     network = sample.get('network', {})
                     disk = sample.get('disk', {})
                     
-                    # Get timestamp
+                    # Get timestamp - ensure it's an integer
                     timestamp = sample.get('timestamp', sample.get('time_seconds', 0))
                     if isinstance(timestamp, str):
                         try:
-                            timestamp = int(datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S').timestamp())
+                            # Parse datetime string to timestamp
+                            dt = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
+                            timestamp = int(dt.timestamp())
                         except:
-                            timestamp = 0
+                            try:
+                                # Try alternative formats or just convert to int
+                                timestamp = int(float(timestamp))
+                            except:
+                                timestamp = 0
+                    else:
+                        # Ensure numeric timestamp is an integer
+                        timestamp = int(timestamp) if timestamp else 0
                     
                     # Extract CPU usage
                     cpu_usage = cpu.get('usage', {})
@@ -1842,6 +1870,12 @@ class DataExporter:
                     # Extract NPU usage  
                     npu_usage = sample.get('npu', {}).get('usage', 0)
                     
+                    # Get timestamp_ms - ensure it's an integer
+                    timestamp_ms = sample.get('timestamp_ms')
+                    if timestamp_ms is None:
+                        timestamp_ms = timestamp * 1000 if timestamp else 0
+                    timestamp_ms = int(timestamp_ms) if timestamp_ms else 0
+                    
                     # Build simplified values tuple with essential fields
                     values = (
                         session_logger.session_id,
@@ -1852,7 +1886,7 @@ class DataExporter:
                         gpu_info.get('gpus', [{}])[0].get('temperature', 0) if gpu_info.get('gpus') else 0,  # gpu_temp
                         gpu_info.get('gpus', [{}])[0].get('memory_used', 0) if gpu_info.get('gpus') else 0,  # gpu_memory
                         npu_usage,  # npu_usage
-                        sample.get('timestamp_ms', timestamp * 1000),
+                        timestamp_ms,
                         None,  # cpu_user
                         None,  # cpu_nice
                         None,  # cpu_sys
