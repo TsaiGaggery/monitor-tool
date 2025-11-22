@@ -489,8 +489,13 @@ class DataExporter:
             # Note: Put SQL directly in command args (stdin doesn't work through adb shell su)
             sql_query = f"SELECT * FROM raw_samples WHERE timestamp >= {start_timestamp} AND timestamp <= {end_timestamp} ORDER BY timestamp ASC"
             
+            # Determine sqlite3 command (try local tmp first, then system)
+            # We need to construct the command carefully to avoid shell syntax errors
+            # "if ... fi -json" is invalid shell syntax
+            cmd_str = f"if [ -x /data/local/tmp/sqlite3 ]; then /data/local/tmp/sqlite3 -json {android_db_path} '{sql_query}'; else sqlite3 -json {android_db_path} '{sql_query}'; fi"
+            
             # Build command
-            cmd = ["adb", "-s", device_id, "shell", f"su 0 sqlite3 -json {android_db_path} '{sql_query}'"]
+            cmd = ["adb", "-s", device_id, "shell", f"su 0 sh -c \"{cmd_str}\""]
             
             result = subprocess.run(
                 cmd,

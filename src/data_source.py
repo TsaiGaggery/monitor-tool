@@ -418,26 +418,31 @@ class LocalDataSource(MonitorDataSource):
 class AndroidDataSource(MonitorDataSource):
     """Android device data source via ADB (raw data version)."""
     
-    def __init__(self, device_ip: str, port: int = 5555, enable_tier1: bool = False):
+    def __init__(self, device_ip: str, port: int = 5555, enable_tier1: bool = False, config: Dict = None):
         """Initialize Android data source.
         
         Args:
             device_ip: Android device IP address
             port: ADB port (default: 5555)
             enable_tier1: Enable Tier 1 metrics (context switches, load avg, etc.)
+            config: Configuration dictionary
         """
         from monitors.adb_monitor_raw import ADBMonitorRaw
         
         self.device_ip = device_ip
         self.port = port
         self.enable_tier1 = enable_tier1
+        self.config = config or {}
         self.adb_monitor = None
         self._connected = False
+        
+        # Expose adb_device property for LogMonitor
+        self.adb_device = f"{device_ip}:{port}"
         
         # Initialize ProcessMonitor for ADB mode
         from monitors.process_monitor import ProcessMonitor
         self.process_monitor = ProcessMonitor(
-            config={'enabled': True},
+            config=self.config.get('tier2', {}).get('process_monitoring', {'enabled': True}),
             mode='adb',
             adb_device=f"{device_ip}:{port}"
         )
@@ -448,7 +453,7 @@ class AndroidDataSource(MonitorDataSource):
             from monitors.adb_monitor_raw import ADBMonitorRaw
             
             # ADBMonitorRaw automatically starts streaming in __init__
-            self.adb_monitor = ADBMonitorRaw(self.device_ip, self.port, enable_tier1=self.enable_tier1)
+            self.adb_monitor = ADBMonitorRaw(self.device_ip, self.port, enable_tier1=self.enable_tier1, config=self.config)
             self._connected = True
             return True
         except Exception as e:

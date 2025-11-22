@@ -346,16 +346,33 @@
             const annotations = [];
             
             for (const logEvent of logEvents) {
+                // Filter: Only show Critical, Error, and Warning
+                if (['info', 'debug'].includes(logEvent.severity)) {
+                    continue;
+                }
+
                 // Find the closest timestamp index for this log event
                 let closestIndex = 0;
-                let minDiff = Math.abs(timestamps[0] - logEvent.timestamp);
+                
+                // Parse first timestamp string to Unix timestamp (seconds)
+                // timestamps format: "YYYY-MM-DD HH:MM:SS" -> replace space with T for ISO format
+                let chartTime = new Date(timestamps[0].replace(' ', 'T')).getTime() / 1000;
+                let minDiff = Math.abs(chartTime - logEvent.timestamp);
                 
                 for (let i = 1; i < timestamps.length; i++) {
-                    const diff = Math.abs(timestamps[i] - logEvent.timestamp);
+                    chartTime = new Date(timestamps[i].replace(' ', 'T')).getTime() / 1000;
+                    const diff = Math.abs(chartTime - logEvent.timestamp);
                     if (diff < minDiff) {
                         minDiff = diff;
                         closestIndex = i;
                     }
+                }
+                
+                // Only add annotation if it's within reasonable range (e.g. 5 seconds)
+                // Otherwise logs from way before/after the session might be mapped to start/end
+                if (minDiff > 300) { // 5 minutes tolerance
+                     console.log(`Skipping log event at ${logEvent.timestamp} (diff ${minDiff}s too large)`);
+                     continue;
                 }
                 
                 console.log(`Log event ${logEvent.severity} at timestamp ${logEvent.timestamp} -> index ${closestIndex} (chart time: ${timestamps[closestIndex]}, diff: ${minDiff}s)`);

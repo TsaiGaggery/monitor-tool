@@ -133,7 +133,7 @@ def main():
     elif args.adb:
         print(f"🤖 Android Monitor Mode")
         print(f"📱 Device: {args.ip}:{args.port}")
-        data_source = AndroidDataSource(args.ip, args.port, enable_tier1=enable_tier1)
+        data_source = AndroidDataSource(args.ip, args.port, enable_tier1=enable_tier1, config=config)
     else:
         data_source = LocalDataSource(enable_tier1=enable_tier1, config=config)
     

@@ -162,6 +162,7 @@ class LogMonitor:
             to be in local timezone and converted to UTC for comparison.
         """
         if not self.enabled:
+            print(f"⚠️  LogMonitor disabled in config")
             return []
         
         # Ensure start/end times are timezone-aware (UTC)

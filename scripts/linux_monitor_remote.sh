@@ -705,10 +705,6 @@ main() {
     # Initialize database on remote device (redirect errors to stderr to avoid mixing with JSON stdout)
     init_database 2>&2
     
-    # Counter for process collection throttling
-    LOOP_COUNT=0
-    PROCESS_INTERVAL=5  # Collect processes every 5 iterations to save CPU
-    
     while true; do
         LOOP_START=$(date +%s%3N)
         
@@ -779,11 +775,8 @@ main() {
             echo "[$(date)] DB INSERT failed at timestamp $TIMESTAMP" >> /tmp/monitor_db_errors.log
         fi
         
-        # Collect and store top processes (throttled)
-        if [ $((LOOP_COUNT % PROCESS_INTERVAL)) -eq 0 ]; then
-            collect_top_processes "$TIMESTAMP"
-        fi
-        LOOP_COUNT=$((LOOP_COUNT + 1))
+        # Collect and store top processes
+        collect_top_processes "$TIMESTAMP"
         
         # Output JSON to stdout (for SSH streaming to host)
         # Send RAW gpu_runtime_ms AND timestamp_ms for accurate host-side calculation
